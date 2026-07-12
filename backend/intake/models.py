@@ -1,0 +1,387 @@
+"""
+Domain models for the Factory Gate-Intake platform.
+
+The data model mirrors the PostgreSQL DDL in ``sql/schema.sql`` one-to-one. The single
+most important piece of business logic lives on ``Worker.evaluate_compliance`` /
+``Worker.compliance_against_project`` which decides whether a worker may be
+deployed to a given project and, if not, *exactly* why.
+"""
+from __future__ import annotations
+
+from django.contrib.auth.models import AbstractUser
+from django.db import models
+from django.utils import timezone
+
+
+# ---------------------------------------------------------------------------
+# Users & roles
+# ---------------------------------------------------------------------------
+class User(AbstractUser):
+    """Custom user carrying a factory persona role.
+
+    We authenticate by email but keep ``username`` (Django needs it) mirrored to
+    the email for simplicity.
+    """
+
+    class Role(models.TextChoices):
+        PRINCIPAL_EMPLOYER = "PE", "Principal Employer"
+        CONTRACTOR = "CONTRACTOR", "Contractor"
+        FIELD_OFFICER = "FIELD_OFFICER", "Field Officer"
+        GATE_SECURITY = "GATE_SECURITY", "Gate Security"
+
+    email = models.EmailField(unique=True)
+    role = models.CharField(max_length=20, choices=Role.choices)
+    # Contractors and field officers belong to a vendor/company label (free text
+    # for this MVP). PE + Gate belong to the factory.
+    organization = models.CharField(max_length=150, blank=True, default="")
+
+    USERNAME_FIELD = "email"
+    REQUIRED_FIELDS = ["username"]
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return f"{self.email} ({self.get_role_display()})"
+
+
+# ---------------------------------------------------------------------------
+# Requirements catalogue
+# ---------------------------------------------------------------------------
+class RequirementMaster(models.Model):
+    """A document type that a worker may be required to hold (Aadhar, PAN, ...)."""
+
+    name = models.CharField(max_length=120, unique=True)
+    description = models.CharField(max_length=255, blank=True, default="")
+    # Expirable requirements (e.g. Safety Training) are only "Verified" while the
+    # attached document's expiry_date is still in the future.
+    is_expirable = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "requirements_master"
+        ordering = ["name"]
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return self.name
+
+
+class Project(models.Model):
+    name = models.CharField(max_length=180)
+    description = models.TextField(blank=True, default="")
+    principal_employer = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="owned_projects",
+        limit_choices_to={"role": User.Role.PRINCIPAL_EMPLOYER},
+    )
+    # Contractors that the PE has assigned to work on this project.
+    contractors = models.ManyToManyField(
+        User,
+        related_name="assigned_projects",
+        blank=True,
+        limit_choices_to={"role": User.Role.CONTRACTOR},
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "projects"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["is_active"])]
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return self.name
+
+    def mandatory_requirement_ids(self) -> list[int]:
+        return list(
+            self.project_requirements.filter(is_mandatory=True).values_list(
+                "requirement_id", flat=True
+            )
+        )
+
+
+class ProjectRequirement(models.Model):
+    """Junction: which requirements a given project demands."""
+
+    project = models.ForeignKey(
+        Project, on_delete=models.CASCADE, related_name="project_requirements"
+    )
+    requirement = models.ForeignKey(
+        RequirementMaster, on_delete=models.CASCADE, related_name="in_projects"
+    )
+    is_mandatory = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "project_requirements"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project", "requirement"],
+                name="uq_project_requirement",
+            )
+        ]
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return f"{self.project.name} → {self.requirement.name}"
+
+
+# ---------------------------------------------------------------------------
+# Workers & documents
+# ---------------------------------------------------------------------------
+class Worker(models.Model):
+    class Status(models.TextChoices):
+        ACTIVE = "ACTIVE", "Active"
+        INACTIVE = "INACTIVE", "Inactive"
+        BLOCKED = "BLOCKED", "Blocked"
+
+    name = models.CharField(max_length=150)
+    skill_type = models.CharField(max_length=100, db_index=True)
+    # Aadhar is the worker's unique national ID — enforced UNIQUE to prevent
+    # duplicate master profiles.
+    aadhar_number = models.CharField(max_length=12, unique=True)
+    status = models.CharField(
+        max_length=12, choices=Status.choices, default=Status.ACTIVE
+    )
+    # The vendor/contractor this worker is pre-assigned to. Field Officers create
+    # workers in the master registry and stamp this ownership.
+    contractor = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="workers",
+        limit_choices_to={"role": User.Role.CONTRACTOR},
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "workers"
+        ordering = ["name"]
+        indexes = [
+            models.Index(fields=["aadhar_number"]),
+            models.Index(fields=["contractor", "skill_type"]),
+        ]
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return f"{self.name} [{self.aadhar_number}]"
+
+    # -- Compliance engine ---------------------------------------------------
+    def compliance_against_project(self, project: "Project") -> dict:
+        """Evaluate this worker against a project's mandatory requirements.
+
+        Returns a structured dict describing readiness and, for every gap, the
+        precise reason it is a gap. This is the single source of truth consumed by
+        the eligible-workers endpoint, the contractor UI, and the gate check.
+
+        Shape::
+
+            {
+                "worker_id": 12,
+                "is_compliant": False,
+                "satisfied": [{"requirement_id": 1, "requirement_name": "Aadhar"}],
+                "gaps": [
+                    {
+                        "requirement_id": 3,
+                        "requirement_name": "Safety Training",
+                        "is_expirable": True,
+                        "reason": "EXPIRED",          # MISSING | EXPIRED | REJECTED | PENDING
+                        "document_id": 45,            # null when MISSING
+                        "expiry_date": "2025-01-01",  # null when not applicable
+                        "rejection_reason": "",
+                    },
+                    ...
+                ],
+            }
+        """
+        today = timezone.now().date()
+
+        # Pull the project's mandatory requirements once.
+        required = list(
+            project.project_requirements.filter(is_mandatory=True).select_related(
+                "requirement"
+            )
+        )
+
+        # Index this worker's documents by requirement so lookups are O(1). A
+        # worker can technically have more than one doc per requirement (e.g. a
+        # rejected one plus a re-uploaded one) so we keep the *best* per slot.
+        docs_by_requirement: dict[int, list[WorkerDocument]] = {}
+        for doc in self.documents.all():
+            docs_by_requirement.setdefault(doc.requirement_id, []).append(doc)
+
+        satisfied: list[dict] = []
+        gaps: list[dict] = []
+
+        for pr in required:
+            req = pr.requirement
+            candidate_docs = docs_by_requirement.get(req.id, [])
+
+            best = self._best_document(candidate_docs, req, today)
+
+            if best is not None and best["reason"] is None:
+                satisfied.append(
+                    {"requirement_id": req.id, "requirement_name": req.name}
+                )
+            else:
+                # No document at all, or the best available one is not usable.
+                reason = best["reason"] if best else "MISSING"
+                doc = best["doc"] if best else None
+                gaps.append(
+                    {
+                        "requirement_id": req.id,
+                        "requirement_name": req.name,
+                        "is_expirable": req.is_expirable,
+                        "reason": reason,
+                        "document_id": doc.id if doc else None,
+                        "expiry_date": doc.expiry_date.isoformat()
+                        if doc and doc.expiry_date
+                        else None,
+                        "rejection_reason": doc.rejection_reason if doc else "",
+                    }
+                )
+
+        return {
+            "worker_id": self.id,
+            "is_compliant": len(gaps) == 0,
+            "satisfied": satisfied,
+            "gaps": gaps,
+        }
+
+    @staticmethod
+    def _best_document(
+        docs: list["WorkerDocument"], requirement: "RequirementMaster", today
+    ) -> dict | None:
+        """Pick the most favourable document for a requirement and classify it.
+
+        Preference order: a fully valid Verified (non-expired) document wins. If
+        none is valid we surface the *least bad* reason so the contractor sees the
+        most actionable message (an expired verified doc beats a pending one).
+
+        Returns ``{"doc": WorkerDocument, "reason": <str|None>}`` or ``None`` when
+        the worker holds no document for this requirement at all.
+        """
+        if not docs:
+            return None
+
+        ranked: list[tuple[int, WorkerDocument, str | None]] = []
+        for doc in docs:
+            if doc.verification_status == WorkerDocument.Status.VERIFIED:
+                if requirement.is_expirable and doc.expiry_date and doc.expiry_date < today:
+                    ranked.append((3, doc, "EXPIRED"))
+                else:
+                    ranked.append((0, doc, None))  # fully valid
+            elif doc.verification_status == WorkerDocument.Status.REJECTED:
+                ranked.append((2, doc, "REJECTED"))
+            else:  # Pending
+                ranked.append((1, doc, "PENDING"))
+
+        ranked.sort(key=lambda t: t[0])  # 0 (valid) is best
+        _, best_doc, reason = ranked[0]
+        return {"doc": best_doc, "reason": reason}
+
+    def is_gate_cleared(self) -> "IntakeList | None":
+        """Return an Approved intake list containing this worker, if any.
+
+        Gate security grants entry only when the worker appears on at least one
+        PE-approved deployment list.
+        """
+        return (
+            IntakeList.objects.filter(
+                status=IntakeList.Status.APPROVED,
+                list_workers__worker=self,
+            )
+            .select_related("project")
+            .order_by("-reviewed_at")
+            .first()
+        )
+
+
+class WorkerDocument(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "Pending", "Pending"
+        VERIFIED = "Verified", "Verified"
+        REJECTED = "Rejected", "Rejected"
+
+    worker = models.ForeignKey(
+        Worker, on_delete=models.CASCADE, related_name="documents"
+    )
+    requirement = models.ForeignKey(
+        RequirementMaster, on_delete=models.CASCADE, related_name="documents"
+    )
+    document_number = models.CharField(max_length=120, blank=True, default="")
+    # We store an uploaded file, exposing its URL. file_url mirrors the DDL column
+    # and is populated from the FileField for API consumers.
+    document_file = models.FileField(upload_to="worker_docs/", null=True, blank=True)
+    file_url = models.URLField(max_length=500, blank=True, default="")
+    verification_status = models.CharField(
+        max_length=10, choices=Status.choices, default=Status.PENDING
+    )
+    expiry_date = models.DateField(null=True, blank=True)
+    rejection_reason = models.CharField(max_length=255, blank=True, default="")
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "worker_documents"
+        indexes = [
+            models.Index(fields=["worker", "requirement"]),
+            models.Index(fields=["verification_status"]),
+        ]
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return f"{self.worker.name} · {self.requirement.name} · {self.verification_status}"
+
+
+# ---------------------------------------------------------------------------
+# Deployment / intake lists
+# ---------------------------------------------------------------------------
+class IntakeList(models.Model):
+    class Status(models.TextChoices):
+        DRAFT = "Draft", "Draft"
+        SUBMITTED = "Submitted", "Submitted"
+        REVISION_REQUESTED = "Revision_Requested", "Revision Requested"
+        APPROVED = "Approved", "Approved"
+        REJECTED = "Rejected", "Rejected"
+
+    project = models.ForeignKey(
+        Project, on_delete=models.CASCADE, related_name="intake_lists"
+    )
+    contractor = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="intake_lists",
+        limit_choices_to={"role": User.Role.CONTRACTOR},
+    )
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.DRAFT
+    )
+    pe_comments = models.TextField(blank=True, default="")
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "intake_lists"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["project", "contractor", "status"])]
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return f"List #{self.id} · {self.project.name} · {self.status}"
+
+
+class IntakeListWorker(models.Model):
+    intake_list = models.ForeignKey(
+        IntakeList, on_delete=models.CASCADE, related_name="list_workers"
+    )
+    worker = models.ForeignKey(
+        Worker, on_delete=models.CASCADE, related_name="list_memberships"
+    )
+
+    class Meta:
+        db_table = "intake_list_workers"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["intake_list", "worker"],
+                name="uq_intake_list_worker",
+            )
+        ]
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return f"{self.worker.name} @ list#{self.intake_list_id}"

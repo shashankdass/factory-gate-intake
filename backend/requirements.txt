@@ -1,0 +1,9 @@
+django==4.2.11
+djangorestframework==3.15.1
+django-cors-headers==4.3.1
+psycopg2-binary==2.9.10
+dj-database-url==2.2.0
+gunicorn==21.2.0
+python-dotenv==1.0.1
+openpyxl==3.1.2
+whitenoise==6.6.0

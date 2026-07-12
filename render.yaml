@@ -1,0 +1,61 @@
+# Render Blueprint — deploys the whole monorepo (Django API + static React
+# frontend + managed PostgreSQL) from a single push, all on Render's free tier.
+#
+# Import via Render dashboard → "New +" → "Blueprint" → pick this repo.
+#
+# Service names below determine the public URLs:
+#   API      -> https://gate-intake-api.onrender.com
+#   Frontend -> https://gate-intake-web.onrender.com
+# If either name is already taken globally, Render appends a suffix — after the
+# first deploy, confirm the real URLs and update CORS_ALLOWED_ORIGINS /
+# VITE_API_BASE_URL below, then redeploy. (See DEPLOY.md.)
+
+databases:
+  - name: gate-intake-db
+    plan: free
+    databaseName: gate_intake
+    user: gate_intake
+
+services:
+  # ---- Backend: Django REST API ----
+  - type: web
+    name: gate-intake-api
+    runtime: python
+    rootDir: backend
+    plan: free
+    buildCommand: "pip install -r requirements.txt && python manage.py collectstatic --noinput"
+    # Migrate + seed on every deploy so a fresh DB always has the dummy personas.
+    # Both steps are idempotent.
+    startCommand: "python manage.py migrate --noinput && python manage.py seed_data && gunicorn core.wsgi:application --bind 0.0.0.0:$PORT"
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: gate-intake-db
+          property: connectionString
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: DJANGO_DEBUG
+        value: "False"
+      - key: DJANGO_ALLOWED_HOSTS
+        value: ".onrender.com"
+      - key: CORS_ALLOWED_ORIGINS
+        value: "https://gate-intake-web.onrender.com"
+      - key: PYTHON_VERSION
+        value: "3.12.6"
+
+  # ---- Frontend: Vite static site ----
+  - type: web
+    name: gate-intake-web
+    runtime: static
+    rootDir: frontend
+    buildCommand: "npm install && npm run build"
+    staticPublishPath: dist
+    envVars:
+      # Baked into the bundle at build time — must be the API's public URL.
+      - key: VITE_API_BASE_URL
+        value: "https://gate-intake-api.onrender.com/api"
+    routes:
+      # SPA fallback so client-side routes (/contractor, /gate, …) resolve.
+      - type: rewrite
+        source: "/*"
+        destination: "/index.html"
