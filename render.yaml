@@ -44,12 +44,14 @@ services:
         value: "3.12.6"
 
   # ---- Frontend: Vite static site ----
+  # NOTE: no rootDir here. We build with an explicit `cd frontend` and publish an
+  # explicit repo-root-relative path, which avoids Render's rootDir/publishPath
+  # ambiguity that otherwise leaves index.html unpublished (404 / no-server).
   - type: web
     name: gate-intake-web
     runtime: static
-    rootDir: frontend
-    buildCommand: "npm install && npm run build"
-    staticPublishPath: dist
+    buildCommand: "cd frontend && npm install && npm run build"
+    staticPublishPath: frontend/dist
     envVars:
       # Baked into the bundle at build time — must be the API's public URL.
       - key: VITE_API_BASE_URL
