@@ -21,6 +21,9 @@ from django.utils import timezone
 from intake.models import (
     IntakeList,
     IntakeListWorker,
+    IntakeMedicalRecord,
+    IntakePoliceVerification,
+    IntakeVideoProgress,
     Project,
     ProjectRequirement,
     RequirementMaster,
@@ -74,6 +77,7 @@ class Command(BaseCommand):
         requirements = self._seed_requirements()
         projects = self._seed_projects(pe, contractor, requirements)
         self._seed_workers(contractor, requirements)
+        self._seed_intake_pillars()
 
         self.stdout.write(self.style.SUCCESS("✔ Seed complete."))
         self.stdout.write("  Dummy logins:")
@@ -250,4 +254,83 @@ class Command(BaseCommand):
                         "rejection_reason": rejection,
                         "file_url": "https://example.com/sample-document.pdf",
                     },
+                )
+
+    # -- 5-pillar intake records --------------------------------------------
+    def _seed_intake_pillars(self) -> None:
+        """Seed medical / police / video pillars so each failure mode is visible.
+
+        Ravi is fully compliant (Ready); everyone else fails at least one pillar.
+        Idempotent: only creates records the worker doesn't already have.
+        """
+        today = timezone.now().date()
+        recent = today - timedelta(days=30)  # well within the 1-year window
+        stale = today - timedelta(days=400)  # already expired
+
+        VERIFIED = WorkerDocument.Status.VERIFIED
+        TRADE = IntakeVideoProgress.VideoType.TRADE_TEST
+        SAFETY = IntakeVideoProgress.VideoType.SAFETY_TRAINING
+
+        # aadhar -> (medical spec | None, police spec | None, [(video_type, pct)])
+        plan = {
+            # Ravi: everything passes -> Ready
+            "100000000001": (
+                {"exam_date": recent, "color_blindness": False, "vertigo": False,
+                 "vision": "6/6", "blood_type": "O+"},
+                {"issue_date": recent, "status": VERIFIED, "cert": "PVC-RAVI-01"},
+                [(TRADE, 100), (SAFETY, 100)],
+            ),
+            # Suresh: trade-test video incomplete
+            "100000000002": (
+                {"exam_date": recent, "color_blindness": False, "vertigo": False,
+                 "vision": "6/6", "blood_type": "A+"},
+                {"issue_date": recent, "status": VERIFIED, "cert": "PVC-SURESH-01"},
+                [(TRADE, 40), (SAFETY, 100)],
+            ),
+            # Anil: medical FAILED (color blindness)
+            "100000000003": (
+                {"exam_date": recent, "color_blindness": True, "vertigo": False,
+                 "vision": "6/9", "blood_type": "B+"},
+                {"issue_date": recent, "status": VERIFIED, "cert": "PVC-ANIL-01"},
+                [(TRADE, 100), (SAFETY, 100)],
+            ),
+            # Mahesh: PVC expired
+            "100000000004": (
+                {"exam_date": recent, "color_blindness": False, "vertigo": False,
+                 "vision": "6/6", "blood_type": "AB+"},
+                {"issue_date": stale, "status": VERIFIED, "cert": "PVC-MAHESH-01"},
+                [(TRADE, 100), (SAFETY, 100)],
+            ),
+            # Deepak: no medical / no PVC / no videos at all
+            "100000000005": (None, None, []),
+        }
+
+        for aadhar_no, (med, pol, videos) in plan.items():
+            worker = Worker.objects.filter(aadhar_number=aadhar_no).first()
+            if worker is None:
+                continue
+
+            if med and not worker.medical_records.exists():
+                IntakeMedicalRecord.objects.create(
+                    worker=worker,
+                    exam_date=med["exam_date"],
+                    color_blindness=med["color_blindness"],
+                    vertigo=med["vertigo"],
+                    vision=med["vision"],
+                    blood_type=med["blood_type"],
+                )  # expiry auto-computed
+
+            if pol and not worker.police_verifications.exists():
+                IntakePoliceVerification.objects.create(
+                    worker=worker,
+                    issue_date=pol["issue_date"],
+                    certificate_number=pol["cert"],
+                    verification_status=pol["status"],
+                )
+
+            for vtype, pct in videos:
+                IntakeVideoProgress.objects.get_or_create(
+                    worker=worker,
+                    video_type=vtype,
+                    defaults={"progress_percentage": pct, "is_completed": pct >= 100},
                 )

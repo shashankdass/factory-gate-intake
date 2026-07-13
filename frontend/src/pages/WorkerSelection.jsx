@@ -7,6 +7,8 @@ const REASON_LABEL = {
   EXPIRED: 'Expired',
   REJECTED: 'Rejected',
   PENDING: 'Pending review',
+  FAILED: 'Failed',
+  INCOMPLETE: 'Incomplete',
 }
 
 // Contractor dashboard: pick a project, see pre-assigned workers split into
@@ -19,6 +21,9 @@ export default function WorkerSelection() {
   const [data, setData] = useState(null)
   const [tab, setTab] = useState('ready') // 'ready' | 'fix'
   const [query, setQuery] = useState('')
+  // Master requirement catalogue + the set the contractor is filtering on.
+  const [masterReqs, setMasterReqs] = useState([])
+  const [reqFilter, setReqFilter] = useState(() => new Set())
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(false)
   const [submitMsg, setSubmitMsg] = useState(null)
@@ -69,6 +74,21 @@ export default function WorkerSelection() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, token])
 
+  // Load the master requirement catalogue for the checkbox filter.
+  useEffect(() => {
+    if (!token) return
+    api.requirements(token).then(setMasterReqs).catch((e) => setError(e.message))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token])
+
+  const toggleReq = (id) => {
+    setReqFilter((prev) => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
   // Load the contractor's submitted lists so PE feedback is visible.
   const loadMyLists = async () => {
     if (!token) return
@@ -84,13 +104,34 @@ export default function WorkerSelection() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token])
 
+  // A worker "fulfils" a requirement if they hold a Verified, non-expired
+  // document for it — the same rule the compliance engine uses, but checked here
+  // against ALL master requirements (not just the project's mandatory set).
+  const workerFulfills = (worker, requirementId) => {
+    const today = new Date().toISOString().slice(0, 10)
+    return (worker.documents || []).some(
+      (d) =>
+        d.requirement === requirementId &&
+        d.verification_status === 'Verified' &&
+        (!d.expiry_date || d.expiry_date >= today)
+    )
+  }
+
   // ---- Instant multi-criteria filter -------------------------------------
-  // Matches the typed string against worker name, skill type, OR the names of
-  // any required/missing document on that worker.
+  // Two independent, AND-combined filters:
+  //   1. free-text  -> worker name, skill type, or any requirement name
+  //   2. checkboxes -> worker must FULFIL every ticked master requirement
   const filterList = (list) => {
     const q = query.trim().toLowerCase()
-    if (!q) return list
+    const checked = [...reqFilter]
+
     return list.filter(({ worker, compliance }) => {
+      // (2) every ticked requirement must be fulfilled by this worker.
+      if (checked.length && !checked.every((id) => workerFulfills(worker, id))) {
+        return false
+      }
+      // (1) text search (skipped when empty).
+      if (!q) return true
       if (worker.name.toLowerCase().includes(q)) return true
       if (worker.skill_type.toLowerCase().includes(q)) return true
       const satisfiedNames = (compliance.satisfied || []).map((s) =>
@@ -105,9 +146,12 @@ export default function WorkerSelection() {
 
   const readyList = useMemo(
     () => filterList(data?.ready_to_deploy || []),
-    [data, query]
+    [data, query, reqFilter]
   )
-  const fixList = useMemo(() => filterList(data?.needs_fixes || []), [data, query])
+  const fixList = useMemo(
+    () => filterList(data?.needs_fixes || []),
+    [data, query, reqFilter]
+  )
 
   // Workers that are BOTH visible under the current filter AND ticked. This is
   // exactly what gets submitted, so searching narrows the outgoing list too.
@@ -172,6 +216,34 @@ export default function WorkerSelection() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
+      </div>
+
+      <div className="req-filter">
+        <span className="req-filter-label">
+          Must have fulfilled{reqFilter.size ? ` (${reqFilter.size})` : ''}:
+        </span>
+        {masterReqs.map((r) => (
+          <label
+            key={r.id}
+            className={`req-check ${reqFilter.has(r.id) ? 'on' : ''}`}
+          >
+            <input
+              type="checkbox"
+              checked={reqFilter.has(r.id)}
+              onChange={() => toggleReq(r.id)}
+            />
+            {r.name}
+            {r.is_expirable ? ' ⏳' : ''}
+          </label>
+        ))}
+        {reqFilter.size > 0 && (
+          <button
+            className="btn small ghost"
+            onClick={() => setReqFilter(new Set())}
+          >
+            Clear
+          </button>
+        )}
       </div>
 
       {project && (
@@ -400,7 +472,7 @@ function FixCard({ worker, compliance, token, onSaved }) {
       <ul className="gap-list">
         {compliance.gaps.map((g) => (
           <GapRow
-            key={g.requirement_id}
+            key={g.kind === 'intake' ? `intake-${g.pillar}` : `doc-${g.requirement_id}`}
             workerId={worker.id}
             gap={g}
             token={token}
@@ -418,6 +490,25 @@ function GapRow({ workerId, gap, token, onSaved }) {
   const [expiry, setExpiry] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState(null)
+
+  // Intake pillars (medical / police / video) have no uploadable slot here — the
+  // Field Officer resolves them in the Intake Workbench. Show a read-only reason.
+  if (gap.kind === 'intake') {
+    return (
+      <li className="gap-row intake">
+        <div className="gap-head">
+          <span className="gap-name">🩺 {gap.requirement_name}</span>
+          <span className={`chip ${gap.reason.toLowerCase()}`}>
+            {REASON_LABEL[gap.reason] || gap.reason}
+          </span>
+        </div>
+        <div className="reject-reason">{gap.detail}</div>
+        <div className="muted intake-hint">
+          Resolved by a Field Officer in the Intake Workbench.
+        </div>
+      </li>
+    )
+  }
 
   async function save() {
     if (!file && !docNumber) {

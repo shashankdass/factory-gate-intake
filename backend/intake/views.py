@@ -18,6 +18,9 @@ from __future__ import annotations
 
 import csv
 import io
+import os
+import re
+from datetime import timedelta
 
 from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404
@@ -31,8 +34,12 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import (
+    INTAKE_EXPIRY_DAYS,
     IntakeList,
     IntakeListWorker,
+    IntakeMedicalRecord,
+    IntakePoliceVerification,
+    IntakeVideoProgress,
     Project,
     RequirementMaster,
     User,
@@ -41,7 +48,11 @@ from .models import (
 )
 from .serializers import (
     IntakeListSerializer,
+    IntakeMedicalRecordSerializer,
+    IntakePoliceVerificationSerializer,
+    IntakeVideoProgressSerializer,
     ProjectSerializer,
+    RequirementMasterSerializer,
     UserSerializer,
     WorkerDocumentSerializer,
     WorkerSerializer,
@@ -100,6 +111,21 @@ class LoginView(APIView):
 @permission_classes([IsAuthenticated])
 def me(request):
     return Response(UserSerializer(request.user).data)
+
+
+# ---------------------------------------------------------------------------
+# Requirements catalogue
+# ---------------------------------------------------------------------------
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def requirements(request):
+    """GET /api/requirements/ — the full master requirement catalogue.
+
+    Used by the contractor's checkbox filter to search workers by which
+    requirements they have fulfilled, independent of any project's mandatory set.
+    """
+    qs = RequirementMaster.objects.all()
+    return Response(RequirementMasterSerializer(qs, many=True).data)
 
 
 # ---------------------------------------------------------------------------
@@ -169,8 +195,10 @@ class EligibleWorkersView(APIView):
             if contractor_id:
                 workers_qs = workers_qs.filter(contractor_id=contractor_id)
 
-        # Prefetch documents so each compliance evaluation avoids N+1 queries.
-        workers_qs = workers_qs.prefetch_related("documents")
+        # Prefetch all pillar relations so each compliance evaluation avoids N+1.
+        workers_qs = workers_qs.prefetch_related(
+            "documents", "video_progress", "medical_records", "police_verifications"
+        )
 
         required = [
             {
@@ -328,7 +356,7 @@ class WorkerListView(APIView):
             qs = Worker.objects.filter(contractor=request.user)
         else:
             qs = Worker.objects.all()
-        qs = qs.prefetch_related("documents")
+        qs = qs.prefetch_related("documents", "video_progress")
         return Response(WorkerSerializer(qs, many=True).data)
 
 
@@ -723,4 +751,454 @@ class GateCheckView(APIView):
                     "aadhar_number": worker.aadhar_number,
                 },
             }
+        )
+
+
+# ---------------------------------------------------------------------------
+# Field Officer Intake Workbench — mock OCR, strict verification, video heartbeat
+# ---------------------------------------------------------------------------
+def _iso(d):
+    return d.isoformat() if d else None
+
+
+class MockOcrView(APIView):
+    """
+    GET /api/intake/mock-ocr/?sample=<key>   (Field Officer)
+
+    Simulates an OCR engine. Returns a mock extraction for the chosen sample
+    document, including a ``form_type`` that tells the workbench which right-pane
+    form to render. Dates are computed relative to *today* so samples stay
+    meaningful over time (the "expired" sample is always ~400 days old).
+    """
+
+    def get(self, request):
+        denied = _require_role(request, User.Role.FIELD_OFFICER)
+        if denied:
+            return denied
+
+        today = timezone.now().date()
+        sample = (request.query_params.get("sample") or "aadhar_clean").strip()
+
+        samples = {
+            "aadhar_clean": {
+                "form_type": "IDENTITY",
+                "label": "Clean Aadhar Card",
+                "requirement_name": "Aadhar",
+                "fields": {
+                    "name": "Ravi Kumar",
+                    "aadhar_number": "100000000001",
+                    "dob": "1990-05-14",
+                    "gender": "Male",
+                    "address": "12, Industrial Area, Pune",
+                },
+            },
+            "medical_expired": {
+                "form_type": "MEDICAL",
+                "label": "Expired Medical Form",
+                "requirement_name": "Medical Exam",
+                "fields": {
+                    "exam_date": _iso(today - timedelta(days=400)),  # already expired
+                    "color_blindness": False,
+                    "vision": "6/9",
+                    "vertigo": False,
+                    "blood_type": "B+",
+                },
+            },
+            "pvc_valid": {
+                "form_type": "POLICE",
+                "label": "Valid Police Verification (PVC)",
+                "requirement_name": "Police Verification",
+                "fields": {
+                    "certificate_number": "PVC-2026-8842",
+                    "issue_date": _iso(today - timedelta(days=30)),  # valid
+                    "verification_status": "Verified",
+                },
+            },
+        }
+
+        data = samples.get(sample)
+        if data is None:
+            return Response(
+                {"detail": f"Unknown sample '{sample}'.", "available": list(samples)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response({"sample": sample, **data})
+
+
+class VerifyDocumentView(APIView):
+    """
+    POST /api/intake/verify-document/   (Field Officer)
+
+    Strict verification-saving endpoint. For MEDICAL / POLICE it enforces that the
+    exam/issue date is not older than 1 year and writes ``expiry_date`` exactly
+    365 days out (the model does this on save). For IDENTITY it marks the named
+    WorkerDocument as Verified.
+
+    Accepts either JSON or multipart/form-data. When multipart, the scanned
+    document is read from the ``file`` field and stored on the record — so the
+    Field Officer can upload the physical document and verify it on the spot.
+
+    Body: {"worker": <id>, "doc_type": "MEDICAL"|"POLICE"|"IDENTITY", ...fields}
+    """
+
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    @staticmethod
+    def _as_bool(value):
+        # Multipart sends booleans as strings ("true"/"false"); coerce safely.
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    def post(self, request):
+        denied = _require_role(request, User.Role.FIELD_OFFICER)
+        if denied:
+            return denied
+
+        worker = get_object_or_404(Worker, pk=request.data.get("worker"))
+        doc_type = (request.data.get("doc_type") or "").upper()
+        upload = request.FILES.get("file")
+        today = timezone.now().date()
+
+        def check_not_expired(date_str, field_label):
+            """Return (date, error_response). Rejects dates > 365 days old."""
+            if not date_str:
+                return None, Response(
+                    {"detail": f"{field_label} is required."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                d = timezone.datetime.fromisoformat(str(date_str)).date()
+            except ValueError:
+                return None, Response(
+                    {"detail": f"{field_label} is not a valid ISO date."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if (today - d).days > INTAKE_EXPIRY_DAYS:
+                return None, Response(
+                    {
+                        "detail": f"Rejected: {field_label} ({d.isoformat()}) is more "
+                        f"than {INTAKE_EXPIRY_DAYS} days old — the document is already "
+                        f"expired.",
+                        "expired": True,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            return d, None
+
+        if doc_type == "MEDICAL":
+            exam_date, err = check_not_expired(
+                request.data.get("exam_date"), "Medical exam date"
+            )
+            if err:
+                return err
+            rec, _ = IntakeMedicalRecord.objects.update_or_create(
+                worker=worker,
+                exam_date=exam_date,
+                defaults={
+                    "color_blindness": self._as_bool(
+                        request.data.get("color_blindness", False)
+                    ),
+                    "vision": request.data.get("vision", ""),
+                    "vertigo": self._as_bool(request.data.get("vertigo", False)),
+                    "blood_type": request.data.get("blood_type", ""),
+                },
+            )  # expiry_date computed in model.save()
+            if upload:
+                rec.document_file = upload
+                rec.save()
+            return Response(
+                IntakeMedicalRecordSerializer(rec).data, status=status.HTTP_201_CREATED
+            )
+
+        if doc_type == "POLICE":
+            issue_date, err = check_not_expired(
+                request.data.get("issue_date"), "Police verification issue date"
+            )
+            if err:
+                return err
+            rec, _ = IntakePoliceVerification.objects.update_or_create(
+                worker=worker,
+                issue_date=issue_date,
+                defaults={
+                    "certificate_number": request.data.get("certificate_number", ""),
+                    "verification_status": request.data.get(
+                        "verification_status", WorkerDocument.Status.VERIFIED
+                    ),
+                },
+            )
+            if upload:
+                rec.document_file = upload
+                rec.save()
+            return Response(
+                IntakePoliceVerificationSerializer(rec).data,
+                status=status.HTTP_201_CREATED,
+            )
+
+        if doc_type == "IDENTITY":
+            requirement_name = request.data.get("requirement_name", "Aadhar")
+            requirement = RequirementMaster.objects.filter(
+                name=requirement_name
+            ).first()
+            if requirement is None:
+                return Response(
+                    {"detail": f"No requirement named '{requirement_name}'."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            defaults = {
+                "document_number": request.data.get("document_number", ""),
+                "verification_status": WorkerDocument.Status.VERIFIED,
+                "rejection_reason": "",
+            }
+            # Expirable identity docs (e.g. Safety Training) may carry an expiry.
+            expiry = request.data.get("expiry_date")
+            if expiry:
+                defaults["expiry_date"] = expiry
+            doc, _ = WorkerDocument.objects.update_or_create(
+                worker=worker,
+                requirement=requirement,
+                defaults=defaults,
+            )
+            if upload:
+                doc.document_file = upload
+                doc.file_url = ""
+                doc.save()
+            return Response(
+                WorkerDocumentSerializer(doc).data, status=status.HTTP_201_CREATED
+            )
+
+        return Response(
+            {"detail": "doc_type must be MEDICAL, POLICE or IDENTITY."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+class VideoHeartbeatView(APIView):
+    """
+    POST /api/intake/video-heartbeat/   (Field Officer)
+
+    Maps an HTML5 video timeline to persisted progress. ``is_completed`` flips to
+    True only when ``progress_percentage`` reaches exactly 100. Progress never
+    moves backwards (guards against a page reload resetting a completed video).
+
+    Body: {"worker": <id>, "video_type": "TRADE_TEST"|"SAFETY_TRAINING",
+           "progress_percentage": <0-100>}
+    """
+
+    def post(self, request):
+        denied = _require_role(request, User.Role.FIELD_OFFICER)
+        if denied:
+            return denied
+
+        worker = get_object_or_404(Worker, pk=request.data.get("worker"))
+        video_type = request.data.get("video_type")
+        if video_type not in IntakeVideoProgress.VideoType.values:
+            return Response(
+                {
+                    "detail": f"video_type must be one of "
+                    f"{IntakeVideoProgress.VideoType.values}."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            pct = int(request.data.get("progress_percentage", 0))
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "progress_percentage must be an integer."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        pct = max(0, min(100, pct))
+
+        vp, _ = IntakeVideoProgress.objects.get_or_create(
+            worker=worker, video_type=video_type
+        )
+        # Monotonic: never regress a previously higher watermark.
+        vp.progress_percentage = max(vp.progress_percentage, pct)
+        vp.is_completed = vp.progress_percentage >= 100
+        vp.save()
+        return Response(IntakeVideoProgressSerializer(vp).data)
+
+
+# ---------------------------------------------------------------------------
+# Real OCR extraction — pluggable provider (OCR.space default), mock fallback
+# ---------------------------------------------------------------------------
+# Provider is chosen by the OCR_PROVIDER env var:
+#   "ocrspace"  (default) -> free hosted OCR.space API (set OCRSPACE_API_KEY)
+#   "tesseract"           -> local Tesseract binary (dev only; not on Render native)
+#   "mock"                -> canned sample values (no network, always works)
+#   "claude"              -> Anthropic vision (paid; requires `anthropic` + key)
+# Any provider failure falls back to empty fields + a "enter manually" note, so
+# the Field Officer workflow never breaks.
+
+_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2}|\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4})\b")
+
+
+def _to_iso_date(raw: str):
+    raw = (raw or "").strip()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y",
+                "%m/%d/%Y", "%d %b %Y", "%d %B %Y"):
+        try:
+            return timezone.datetime.strptime(raw, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+def _first_date(text: str):
+    match = _DATE_RE.search(text or "")
+    return _to_iso_date(match.group(1)) if match else None
+
+
+def _ocrspace_text(file_bytes, filename, content_type) -> str:
+    """Call the free OCR.space API and return the concatenated parsed text."""
+    import requests
+
+    api_key = os.environ.get("OCRSPACE_API_KEY", "helloworld")  # public demo key
+    resp = requests.post(
+        "https://api.ocr.space/parse/image",
+        files={"file": (filename or "upload", file_bytes, content_type or "application/octet-stream")},
+        data={"apikey": api_key, "language": "eng", "OCREngine": "2",
+              "isOverlayRequired": "false", "scale": "true"},
+        timeout=40,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("IsErroredOnProcessing"):
+        raise RuntimeError(data.get("ErrorMessage") or "OCR.space processing error")
+    results = data.get("ParsedResults") or []
+    return "\n".join(r.get("ParsedText", "") for r in results).strip()
+
+
+def _tesseract_text(file_bytes) -> str:
+    import pytesseract
+    from PIL import Image
+
+    return pytesseract.image_to_string(Image.open(io.BytesIO(file_bytes)))
+
+
+def _parse_fields(text: str, doc_type: str, requirement_name: str = "") -> dict:
+    """Best-effort field extraction from raw OCR text. The FO verifies/corrects."""
+    t = text or ""
+    up = t.upper()
+
+    if doc_type == "MEDICAL":
+        vm = re.search(r"\b6\s*/\s*(6|9|12|18|24|36|60)\b", t)
+        # No trailing \b — a sign like "+" is non-word, so "B+" has no boundary after it.
+        bm = re.search(r"\b(AB|A|B|O)\s*([+\-]|POS|NEG)", up)
+        blood = ""
+        if bm:
+            blood = bm.group(1) + ("+" if bm.group(2) in ("+", "POS") else "-")
+        flagged = re.compile(r"DETECT|PRESENT|POSITIVE|\bYES\b")
+        return {
+            "exam_date": _first_date(t) or "",
+            "vision": ("6/" + vm.group(1)) if vm else "",
+            "blood_type": blood,
+            "color_blindness": bool(re.search(r"COLOU?R\s*BLIND", up)) and bool(flagged.search(up)),
+            "vertigo": bool(re.search(r"VERTIGO", up)) and bool(flagged.search(up)),
+        }
+
+    if doc_type == "POLICE":
+        cert = re.search(r"\b([A-Z]{2,}[-/ ]?\d[\w-]*)\b", t)
+        return {
+            "certificate_number": cert.group(1) if cert else "",
+            "issue_date": _first_date(t) or "",
+            "verification_status": "Verified",
+        }
+
+    # IDENTITY (Aadhaar / PAN). Use a literal space (not \s) between groups so the
+    # match can't span a newline and swallow a nearby date's year.
+    aadhaar = re.search(r"\b(\d{4} ?\d{4} ?\d{4})\b", t)
+    pan = re.search(r"\b([A-Z]{5}\d{4}[A-Z])\b", up)
+    number = ""
+    if requirement_name == "PAN" and pan:
+        number = pan.group(1)
+    elif aadhaar:
+        number = re.sub(r"\s", "", aadhaar.group(1))
+    elif pan:
+        number = pan.group(1)
+    name = ""
+    for line in t.splitlines():
+        s = line.strip()
+        if re.fullmatch(r"[A-Za-z ]{4,40}", s) and not re.search(
+            r"GOVERNMENT|INDIA|MALE|FEMALE|DOB|YEAR|BIRTH|FATHER|ADDRESS|"
+            r"PERMANENT|ACCOUNT|INCOME|DEPARTMENT|CARD|\bNAME\b|GENDER|AADHAAR|"
+            r"WORKER|CERTIFICATE|VERIFICATION|FITNESS|MEDICAL|POLICE|STATUS|"
+            r"ISSUE|EXAM|VISION|VERTIGO|BLOOD|COLOU?R|DETECTED|NONE|VERIFIED",
+            s.upper(),
+        ):
+            name = s.title()
+            break
+    return {"name": name, "aadhar_number": number, "document_number": number}
+
+
+def _mock_fields(doc_type: str, requirement_name: str, today) -> dict:
+    if doc_type == "MEDICAL":
+        return {"exam_date": (today - timedelta(days=30)).isoformat(), "vision": "6/6",
+                "blood_type": "O+", "color_blindness": False, "vertigo": False}
+    if doc_type == "POLICE":
+        return {"certificate_number": "PVC-DEMO-1001",
+                "issue_date": (today - timedelta(days=30)).isoformat(),
+                "verification_status": "Verified"}
+    num = "ABCDE1234F" if requirement_name == "PAN" else "100000000001"
+    return {"name": "Ravi Kumar", "aadhar_number": num, "document_number": num}
+
+
+def _extract_fields(file_bytes, filename, content_type, doc_type, requirement_name, today):
+    provider = os.environ.get("OCR_PROVIDER", "ocrspace").lower()
+    if provider == "mock":
+        return _mock_fields(doc_type, requirement_name, today), "mock", None
+
+    text, err = None, None
+    try:
+        if provider == "tesseract":
+            text = _tesseract_text(file_bytes)
+        else:  # "ocrspace" (default)
+            text = _ocrspace_text(file_bytes, filename, content_type)
+    except Exception as exc:  # noqa: BLE001 — degrade to manual entry, never 500
+        err = str(exc)
+
+    if not text or not text.strip():
+        return {}, provider, err or "No text detected — enter the values manually."
+    return _parse_fields(text, doc_type, requirement_name), provider, None
+
+
+class OcrExtractView(APIView):
+    """
+    POST /api/intake/ocr-extract/   (Field Officer)
+
+    Runs OCR on the uploaded scan and returns best-effort form fields for the
+    given doc_type (IDENTITY | MEDICAL | POLICE). The FO reviews/corrects the
+    values, then commits via /verify-document/. Provider is env-selected; a
+    failure returns empty fields + a note rather than an error.
+    """
+
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        denied = _require_role(request, User.Role.FIELD_OFFICER)
+        if denied:
+            return denied
+
+        upload = request.FILES.get("file")
+        if upload is None:
+            return Response(
+                {"detail": "No file provided under form field 'file'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        doc_type = (request.data.get("doc_type") or "").upper()
+        if doc_type not in {"IDENTITY", "MEDICAL", "POLICE"}:
+            return Response(
+                {"detail": "doc_type must be IDENTITY, MEDICAL or POLICE."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        requirement_name = request.data.get("requirement_name", "")
+        today = timezone.now().date()
+
+        fields, provider, note = _extract_fields(
+            upload.read(), upload.name, upload.content_type,
+            doc_type, requirement_name, today,
+        )
+        return Response(
+            {"form_type": doc_type, "fields": fields, "provider": provider, "note": note}
         )

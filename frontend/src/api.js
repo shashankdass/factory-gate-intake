@@ -37,6 +37,9 @@ export const api = {
 
   me: (token) => request('/me/', { token }),
 
+  // Master requirement catalogue
+  requirements: (token) => request('/requirements/', { token }),
+
   // Projects
   projects: (token) => request('/projects/', { token }),
   project: (token, id) => request(`/projects/${id}/`, { token }),
@@ -83,4 +86,28 @@ export const api = {
   // Gate security
   gateCheck: (token, aadhar) =>
     request(`/gate-check/?aadhar=${encodeURIComponent(aadhar)}`, { token }),
+
+  // Field Officer Intake Workbench (5-pillar)
+  mockOcr: (token, sample) =>
+    request(`/intake/mock-ocr/?sample=${encodeURIComponent(sample)}`, { token }),
+  verifyDocument: (token, body) =>
+    request('/intake/verify-document/', { method: 'POST', body, token }),
+  // Multipart variant — carries the uploaded scan alongside the form fields.
+  verifyDocumentForm: (token, formData) =>
+    request('/intake/verify-document/', {
+      method: 'POST',
+      body: formData,
+      token,
+      isForm: true,
+    }),
+  videoHeartbeat: (token, body) =>
+    request('/intake/video-heartbeat/', { method: 'POST', body, token }),
+  // Real OCR on an uploaded scan → prefill fields for the given doc_type.
+  ocrExtract: (token, formData) =>
+    request('/intake/ocr-extract/', {
+      method: 'POST',
+      body: formData,
+      token,
+      isForm: true,
+    }),
 }

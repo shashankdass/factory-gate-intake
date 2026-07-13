@@ -1,9 +1,36 @@
 import { useRef, useState } from 'react'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext.jsx'
+import FieldOfficerIntakeWorkbench from '../components/FieldOfficerIntakeWorkbench.jsx'
+
+// Field Officer view: two tabs — bulk CSV import, and the intake verification
+// workbench. Keeps the existing /field-officer route + auth intact.
+export default function FieldOfficerUpload() {
+  const [tab, setTab] = useState('workbench')
+  return (
+    <div className="page">
+      <h1>Field Officer</h1>
+      <div className="tabs">
+        <button
+          className={`tab ${tab === 'workbench' ? 'active' : ''}`}
+          onClick={() => setTab('workbench')}
+        >
+          🧾 Intake Workbench
+        </button>
+        <button
+          className={`tab ${tab === 'bulk' ? 'active' : ''}`}
+          onClick={() => setTab('bulk')}
+        >
+          📤 Bulk CSV Import
+        </button>
+      </div>
+      {tab === 'workbench' ? <FieldOfficerIntakeWorkbench /> : <BulkUpload />}
+    </div>
+  )
+}
 
 // Field Officer: mass-import worker master profiles via CSV/Excel drag & drop.
-export default function FieldOfficerUpload() {
+function BulkUpload() {
   const { token } = useAuth()
   const inputRef = useRef(null)
   const [file, setFile] = useState(null)
@@ -36,8 +63,7 @@ export default function FieldOfficerUpload() {
   }
 
   return (
-    <div className="page">
-      <h1>Field Officer · Bulk Worker Import</h1>
+    <div>
       <p className="muted">
         Upload a CSV or .xlsx with columns:{' '}
         <code>name, aadhar_number, skill_type</code> (optional{' '}

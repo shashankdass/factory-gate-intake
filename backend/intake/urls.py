@@ -6,6 +6,8 @@ urlpatterns = [
     # Auth
     path("auth/login/", views.LoginView.as_view(), name="login"),
     path("me/", views.me, name="me"),
+    # Requirements catalogue
+    path("requirements/", views.requirements, name="requirements"),
     # Projects
     path("projects/", views.ProjectListCreateView.as_view(), name="projects"),
     path("projects/<int:pk>/", views.project_detail, name="project-detail"),
@@ -46,4 +48,21 @@ urlpatterns = [
     ),
     # Gate security
     path("gate-check/", views.GateCheckView.as_view(), name="gate-check"),
+    # Field Officer Intake Workbench (5-pillar)
+    path("intake/mock-ocr/", views.MockOcrView.as_view(), name="mock-ocr"),
+    path(
+        "intake/verify-document/",
+        views.VerifyDocumentView.as_view(),
+        name="verify-document",
+    ),
+    path(
+        "intake/video-heartbeat/",
+        views.VideoHeartbeatView.as_view(),
+        name="video-heartbeat",
+    ),
+    path(
+        "intake/ocr-extract/",
+        views.OcrExtractView.as_view(),
+        name="ocr-extract",
+    ),
 ]

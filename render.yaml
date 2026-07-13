@@ -42,6 +42,13 @@ services:
         value: "https://gate-intake-web.onrender.com"
       - key: PYTHON_VERSION
         value: "3.12.6"
+      # OCR for the Field Officer workbench. Default free provider is OCR.space;
+      # "helloworld" is its public demo key — replace with your own free key
+      # (no card) from https://ocr.space/ocrapi for higher limits.
+      - key: OCR_PROVIDER
+        value: "ocrspace"
+      - key: OCRSPACE_API_KEY
+        value: "helloworld"
 
   # ---- Frontend: Vite static site ----
   # NOTE: no rootDir here. We build with an explicit `cd frontend` and publish an

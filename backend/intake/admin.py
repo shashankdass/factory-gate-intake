@@ -4,6 +4,9 @@ from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 from .models import (
     IntakeList,
     IntakeListWorker,
+    IntakeMedicalRecord,
+    IntakePoliceVerification,
+    IntakeVideoProgress,
     Project,
     ProjectRequirement,
     RequirementMaster,
@@ -67,3 +70,20 @@ class IntakeListAdmin(admin.ModelAdmin):
 
 
 admin.site.register(WorkerDocument)
+
+
+@admin.register(IntakeMedicalRecord)
+class IntakeMedicalRecordAdmin(admin.ModelAdmin):
+    list_display = ("worker", "exam_date", "expiry_date", "color_blindness", "vertigo")
+    list_filter = ("color_blindness", "vertigo")
+
+
+@admin.register(IntakePoliceVerification)
+class IntakePoliceVerificationAdmin(admin.ModelAdmin):
+    list_display = ("worker", "certificate_number", "issue_date", "expiry_date", "verification_status")
+
+
+@admin.register(IntakeVideoProgress)
+class IntakeVideoProgressAdmin(admin.ModelAdmin):
+    list_display = ("worker", "video_type", "progress_percentage", "is_completed")
+    list_filter = ("video_type", "is_completed")

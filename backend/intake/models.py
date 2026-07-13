@@ -8,9 +8,14 @@ deployed to a given project and, if not, *exactly* why.
 """
 from __future__ import annotations
 
+from datetime import timedelta
+
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 from django.utils import timezone
+
+# Strict 1-year validity window applied to medical exams and police verifications.
+INTAKE_EXPIRY_DAYS = 365
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +230,7 @@ class Worker(models.Model):
                 doc = best["doc"] if best else None
                 gaps.append(
                     {
+                        "kind": "document",
                         "requirement_id": req.id,
                         "requirement_name": req.name,
                         "is_expirable": req.is_expirable,
@@ -237,12 +243,94 @@ class Worker(models.Model):
                     }
                 )
 
+        # Merge in the 5-pillar intake checks (medical, police, videos). These are
+        # global to the worker, not project-specific, but a failure in any of them
+        # must also block deployment — so they surface as gaps here too.
+        intake_gaps, intake_satisfied = self._intake_status(today)
+        gaps.extend(intake_gaps)
+        satisfied.extend(intake_satisfied)
+
         return {
             "worker_id": self.id,
             "is_compliant": len(gaps) == 0,
             "satisfied": satisfied,
             "gaps": gaps,
         }
+
+    def _intake_status(self, today) -> tuple[list[dict], list[dict]]:
+        """Evaluate the medical / police / video pillars for this worker.
+
+        Returns ``(gaps, satisfied)`` where each entry is a dict tagged with
+        ``kind="intake"`` and a ``pillar`` so the UI can render an explanation
+        (these have no uploadable document slot).
+        """
+        gaps: list[dict] = []
+        satisfied: list[dict] = []
+
+        def add(pillar, name, ok, reason=None, detail=""):
+            if ok:
+                satisfied.append({"pillar": pillar, "requirement_name": name})
+            else:
+                gaps.append(
+                    {
+                        "kind": "intake",
+                        "pillar": pillar,
+                        "requirement_id": None,
+                        "requirement_name": name,
+                        "reason": reason,
+                        "detail": detail,
+                    }
+                )
+
+        # --- Pillar 1: Medical ---
+        med = self.medical_records.order_by("-exam_date").first()
+        if med is None:
+            add("MEDICAL", "Medical Exam", False, "MISSING", "No medical record on file.")
+        elif med.expiry_date and med.expiry_date < today:
+            add("MEDICAL", "Medical Exam", False, "EXPIRED",
+                f"Medical expired on {med.expiry_date.isoformat()}.")
+        else:
+            fails = []
+            if med.color_blindness:
+                fails.append("color blindness")
+            if med.vertigo:
+                fails.append("vertigo")
+            if fails:
+                add("MEDICAL", "Medical Exam", False, "FAILED",
+                    "Medical flag(s): " + ", ".join(fails) + ".")
+            else:
+                add("MEDICAL", "Medical Exam", True)
+
+        # --- Pillar 2: Police verification (PVC) ---
+        pvc = self.police_verifications.order_by("-issue_date").first()
+        if pvc is None:
+            add("POLICE", "Police Verification", False, "MISSING",
+                "No police verification on file.")
+        elif pvc.verification_status != WorkerDocument.Status.VERIFIED:
+            add("POLICE", "Police Verification", False, "PENDING",
+                f"PVC status is {pvc.verification_status}.")
+        elif pvc.expiry_date and pvc.expiry_date < today:
+            add("POLICE", "Police Verification", False, "EXPIRED",
+                f"PVC expired on {pvc.expiry_date.isoformat()}.")
+        else:
+            add("POLICE", "Police Verification", True)
+
+        # --- Pillars 3 & 4: Trade Test + Safety Training videos ---
+        progress = {p.video_type: p for p in self.video_progress.all()}
+        for vtype, label in (
+            ("TRADE_TEST", "Trade Test Video"),
+            ("SAFETY_TRAINING", "Safety Training Video"),
+        ):
+            vp = progress.get(vtype)
+            if vp is None:
+                add(f"VIDEO_{vtype}", label, False, "INCOMPLETE", "Not started (0%).")
+            elif not vp.is_completed or vp.progress_percentage < 100:
+                add(f"VIDEO_{vtype}", label, False, "INCOMPLETE",
+                    f"Only {vp.progress_percentage}% watched.")
+            else:
+                add(f"VIDEO_{vtype}", label, True)
+
+        return gaps, satisfied
 
     @staticmethod
     def _best_document(
@@ -385,3 +473,97 @@ class IntakeListWorker(models.Model):
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return f"{self.worker.name} @ list#{self.intake_list_id}"
+
+
+# ---------------------------------------------------------------------------
+# 5-pillar intake records
+# ---------------------------------------------------------------------------
+class IntakeMedicalRecord(models.Model):
+    """Medical fitness exam. Valid for exactly 1 year from ``exam_date``."""
+
+    worker = models.ForeignKey(
+        Worker, on_delete=models.CASCADE, related_name="medical_records"
+    )
+    color_blindness = models.BooleanField(default=False)
+    vision = models.CharField(max_length=20, blank=True, default="")  # e.g. "6/6"
+    vertigo = models.BooleanField(default=False)
+    blood_type = models.CharField(max_length=5, blank=True, default="")
+    exam_date = models.DateField()
+    expiry_date = models.DateField(blank=True, null=True)
+    # The scanned document the Field Officer verified against, on the spot.
+    document_file = models.FileField(upload_to="intake_docs/", null=True, blank=True)
+    file_url = models.URLField(max_length=500, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "intake_medical_records"
+        ordering = ["-exam_date"]
+        indexes = [models.Index(fields=["worker", "expiry_date"])]
+
+    def save(self, *args, **kwargs):
+        # Strictly recompute the 1-year expiry window from exam_date every save.
+        if self.exam_date:
+            self.expiry_date = self.exam_date + timedelta(days=INTAKE_EXPIRY_DAYS)
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return f"Medical · {self.worker.name} · exp {self.expiry_date}"
+
+
+class IntakePoliceVerification(models.Model):
+    """Police verification certificate (PVC). Valid 1 year from ``issue_date``."""
+
+    worker = models.ForeignKey(
+        Worker, on_delete=models.CASCADE, related_name="police_verifications"
+    )
+    certificate_number = models.CharField(max_length=120, blank=True, default="")
+    issue_date = models.DateField()
+    expiry_date = models.DateField(blank=True, null=True)
+    verification_status = models.CharField(
+        max_length=10,
+        choices=WorkerDocument.Status.choices,
+        default=WorkerDocument.Status.VERIFIED,
+    )
+    document_file = models.FileField(upload_to="intake_docs/", null=True, blank=True)
+    file_url = models.URLField(max_length=500, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "intake_police_verifications"
+        ordering = ["-issue_date"]
+        indexes = [models.Index(fields=["worker", "expiry_date"])]
+
+    def save(self, *args, **kwargs):
+        if self.issue_date:
+            self.expiry_date = self.issue_date + timedelta(days=INTAKE_EXPIRY_DAYS)
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return f"PVC · {self.worker.name} · exp {self.expiry_date}"
+
+
+class IntakeVideoProgress(models.Model):
+    """Per-worker watch progress for a mandatory training/test video."""
+
+    class VideoType(models.TextChoices):
+        TRADE_TEST = "TRADE_TEST", "Trade Test"
+        SAFETY_TRAINING = "SAFETY_TRAINING", "Safety Training"
+
+    worker = models.ForeignKey(
+        Worker, on_delete=models.CASCADE, related_name="video_progress"
+    )
+    video_type = models.CharField(max_length=20, choices=VideoType.choices)
+    progress_percentage = models.PositiveIntegerField(default=0)
+    is_completed = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "intake_video_progress"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["worker", "video_type"], name="uq_worker_video_type"
+            )
+        ]
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return f"{self.get_video_type_display()} · {self.worker.name} · {self.progress_percentage}%"
