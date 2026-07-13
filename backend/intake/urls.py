@@ -18,6 +18,7 @@ urlpatterns = [
     ),
     # Workers
     path("workers/", views.WorkerListView.as_view(), name="workers"),
+    path("contractors/", views.contractors, name="contractors"),
     path(
         "workers/bulk-upload/",
         views.WorkerBulkUploadView.as_view(),

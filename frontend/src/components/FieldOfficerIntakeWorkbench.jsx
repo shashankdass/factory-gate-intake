@@ -49,18 +49,56 @@ export default function FieldOfficerIntakeWorkbench() {
   const [busy, setBusy] = useState(false)
   const [extracting, setExtracting] = useState(false)
   const [msg, setMsg] = useState(null)
+  // Add-worker-from-scratch panel.
+  const [contractors, setContractors] = useState([])
+  const [showAdd, setShowAdd] = useState(false)
+  const [newWorker, setNewWorker] = useState({ name: '', aadhar_number: '', skill_type: '', contractor: '' })
+  const [addBusy, setAddBusy] = useState(false)
+  const [addMsg, setAddMsg] = useState(null)
   const fileInputRef = useRef(null)
 
   const current = DOC_TYPES.find((d) => d.value === docSel) || null
   const formType = current?.formType || null
 
-  useEffect(() => {
-    if (!token) return
+  const loadWorkers = (selectId) =>
     api.workers(token).then((w) => {
       setWorkers(w)
-      if (w.length) setWorkerId((id) => id ?? w[0].id)
+      setWorkerId((id) => selectId ?? id ?? (w[0]?.id ?? null))
+      return w
     })
+
+  useEffect(() => {
+    if (!token) return
+    loadWorkers()
+    api.contractors(token).then(setContractors).catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token])
+
+  async function addWorker() {
+    const { name, aadhar_number, skill_type } = newWorker
+    if (!name.trim() || !skill_type.trim() || aadhar_number.trim().length !== 12) {
+      setAddMsg({ tone: 'error', text: 'Name, 12-digit Aadhar and skill are required.' })
+      return
+    }
+    setAddBusy(true)
+    setAddMsg(null)
+    try {
+      const created = await api.createWorker(token, {
+        name: name.trim(),
+        aadhar_number: aadhar_number.trim(),
+        skill_type: skill_type.trim(),
+        contractor: newWorker.contractor || null,
+      })
+      await loadWorkers(created.id) // add + auto-select the new worker
+      setNewWorker({ name: '', aadhar_number: '', skill_type: '', contractor: '' })
+      setShowAdd(false)
+      setMsg({ tone: 'success', text: `Added ${created.name}. Now upload and verify their documents.` })
+    } catch (e) {
+      setAddMsg({ tone: 'error', text: e.message })
+    } finally {
+      setAddBusy(false)
+    }
+  }
 
   // Revoke the object URL when the upload changes / unmounts.
   useEffect(() => () => upload?.url && URL.revokeObjectURL(upload.url), [upload])
@@ -176,6 +214,7 @@ export default function FieldOfficerIntakeWorkbench() {
         <label>
           Worker:&nbsp;
           <select value={workerId || ''} onChange={(e) => setWorkerId(Number(e.target.value))}>
+            {workers.length === 0 && <option value="">— no workers yet —</option>}
             {workers.map((w) => (
               <option key={w.id} value={w.id}>
                 {w.name} · {w.skill_type}
@@ -207,7 +246,78 @@ export default function FieldOfficerIntakeWorkbench() {
             ))}
           </select>
         </label>
+
+        <button
+          className={`btn small wb-add-toggle ${showAdd ? '' : 'primary'}`}
+          onClick={() => {
+            setShowAdd((v) => !v)
+            setAddMsg(null)
+          }}
+        >
+          {showAdd ? '✕ Cancel' : '➕ New worker'}
+        </button>
       </div>
+
+      {showAdd && (
+        <div className="wb-addworker">
+          <div className="wb-pane-title">Add a new worker to the registry</div>
+          <div className="wb-add-grid">
+            <label className="wb-field">
+              <span>Full name</span>
+              <input
+                value={newWorker.name}
+                onChange={(e) => setNewWorker({ ...newWorker, name: e.target.value })}
+              />
+            </label>
+            <label className="wb-field">
+              <span>Aadhar number (12 digits)</span>
+              <input
+                inputMode="numeric"
+                maxLength={12}
+                value={newWorker.aadhar_number}
+                onChange={(e) =>
+                  setNewWorker({
+                    ...newWorker,
+                    aadhar_number: e.target.value.replace(/\D/g, '').slice(0, 12),
+                  })
+                }
+              />
+            </label>
+            <label className="wb-field">
+              <span>Skill type</span>
+              <input
+                placeholder="e.g. Carpenter"
+                value={newWorker.skill_type}
+                onChange={(e) => setNewWorker({ ...newWorker, skill_type: e.target.value })}
+              />
+            </label>
+            <label className="wb-field">
+              <span>Assign to contractor</span>
+              <select
+                value={newWorker.contractor}
+                onChange={(e) => setNewWorker({ ...newWorker, contractor: e.target.value })}
+              >
+                <option value="">— unassigned —</option>
+                {contractors.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.email}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="wb-commit-row">
+            <button className="btn primary" disabled={addBusy} onClick={addWorker}>
+              {addBusy ? 'Adding…' : 'Create worker'}
+            </button>
+            {addMsg && <span className={`inline-msg ${addMsg.tone}`}>{addMsg.text}</span>}
+          </div>
+          <div className="muted">
+            After creating, the worker is selected below — upload and verify their
+            documents, or assign to a contractor so they appear in that contractor's list.
+          </div>
+        </div>
+      )}
 
       <div className="wb-split">
         {/* LEFT — document previewer (real upload or mock template) */}

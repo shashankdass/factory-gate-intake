@@ -55,6 +55,9 @@ export const api = {
 
   // Workers / Field officer
   workers: (token) => request('/workers/', { token }),
+  createWorker: (token, body) =>
+    request('/workers/', { method: 'POST', body, token }),
+  contractors: (token) => request('/contractors/', { token }),
   bulkUpload: (token, formData) =>
     request('/workers/bulk-upload/', {
       method: 'POST',

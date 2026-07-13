@@ -349,7 +349,10 @@ class WorkerBulkUploadView(APIView):
 
 
 class WorkerListView(APIView):
-    """GET /api/workers/  — role-scoped worker registry (used by dashboards)."""
+    """
+    GET  /api/workers/  — role-scoped worker registry (used by dashboards).
+    POST /api/workers/  — Field Officer creates a single worker from scratch.
+    """
 
     def get(self, request):
         if request.user.role == User.Role.CONTRACTOR:
@@ -358,6 +361,68 @@ class WorkerListView(APIView):
             qs = Worker.objects.all()
         qs = qs.prefetch_related("documents", "video_progress")
         return Response(WorkerSerializer(qs, many=True).data)
+
+    def post(self, request):
+        denied = _require_role(request, User.Role.FIELD_OFFICER)
+        if denied:
+            return denied
+
+        name = (request.data.get("name") or "").strip()
+        aadhar = (request.data.get("aadhar_number") or "").strip()
+        skill = (request.data.get("skill_type") or "").strip()
+        contractor_id = request.data.get("contractor")
+
+        if not (name and aadhar and skill):
+            return Response(
+                {"detail": "name, aadhar_number and skill_type are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(aadhar) != 12 or not aadhar.isdigit():
+            return Response(
+                {"detail": "Aadhar number must be exactly 12 digits."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        contractor = None
+        if contractor_id:
+            contractor = User.objects.filter(
+                id=contractor_id, role=User.Role.CONTRACTOR
+            ).first()
+            if contractor is None:
+                return Response(
+                    {"detail": "Assigned contractor not found."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        try:
+            worker = Worker.objects.create(
+                name=name,
+                aadhar_number=aadhar,
+                skill_type=skill,
+                contractor=contractor,
+            )
+        except IntegrityError:
+            return Response(
+                {"detail": f"A worker with Aadhar {aadhar} already exists."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(
+            WorkerSerializer(worker).data, status=status.HTTP_201_CREATED
+        )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def contractors(request):
+    """GET /api/contractors/ — list contractors, for the Field Officer's
+    'assign worker to contractor' picker."""
+    qs = User.objects.filter(role=User.Role.CONTRACTOR).order_by("email")
+    return Response(
+        [
+            {"id": u.id, "email": u.email, "organization": u.organization}
+            for u in qs
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------

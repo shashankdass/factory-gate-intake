@@ -1008,3 +1008,28 @@ textarea {
   background: #000;
   max-height: 300px;
 }
+
+/* Workbench: push the add-worker action to the far right of the control row */
+.wb-add-toggle {
+  margin-left: auto;
+}
+@media (max-width: 720px) {
+  .wb-add-toggle {
+    margin-left: 0;
+  }
+}
+
+/* Workbench: add-worker panel */
+.wb-addworker {
+  background: var(--card);
+  border: 1px solid var(--blue);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 14px;
+}
+.wb-add-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
