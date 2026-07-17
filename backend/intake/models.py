@@ -17,6 +17,26 @@ from django.utils import timezone
 # Strict 1-year validity window applied to medical exams and police verifications.
 INTAKE_EXPIRY_DAYS = 365
 
+# A worker's free-text skill maps to one of the three trade-test categories.
+TRADE_CATEGORIES = ("MECHANICAL", "CIVIL", "ELECTRICAL")
+_SKILL_TO_CATEGORY = {
+    # Electrical
+    "electrician": "ELECTRICAL", "electrical": "ELECTRICAL", "wireman": "ELECTRICAL",
+    "lineman": "ELECTRICAL", "wiring": "ELECTRICAL",
+    # Civil
+    "mason": "CIVIL", "carpenter": "CIVIL", "plumber": "CIVIL", "painter": "CIVIL",
+    "helper": "CIVIL", "civil": "CIVIL", "tiler": "CIVIL", "shuttering": "CIVIL",
+    # Mechanical
+    "welder": "MECHANICAL", "fitter": "MECHANICAL", "mechanic": "MECHANICAL",
+    "machinist": "MECHANICAL", "turner": "MECHANICAL", "rigger": "MECHANICAL",
+    "mechanical": "MECHANICAL",
+}
+
+
+def category_for_skill(skill_type: str) -> str:
+    """Map a worker's free-text skill to a trade-test category (default MECHANICAL)."""
+    return _SKILL_TO_CATEGORY.get((skill_type or "").strip().lower(), "MECHANICAL")
+
 
 # ---------------------------------------------------------------------------
 # Users & roles
@@ -136,6 +156,11 @@ class Worker(models.Model):
         INACTIVE = "INACTIVE", "Inactive"
         BLOCKED = "BLOCKED", "Blocked"
 
+    class TradeTestStatus(models.TextChoices):
+        PENDING = "PENDING", "Not yet taken"
+        PASSED = "PASSED", "Passed"
+        FAILED = "FAILED", "Failed (locked)"
+
     name = models.CharField(max_length=150)
     skill_type = models.CharField(max_length=100, db_index=True)
     # Aadhar is the worker's unique national ID — enforced UNIQUE to prevent
@@ -143,6 +168,13 @@ class Worker(models.Model):
     aadhar_number = models.CharField(max_length=12, unique=True)
     status = models.CharField(
         max_length=12, choices=Status.choices, default=Status.ACTIVE
+    )
+    # Result of the Field-Officer-administered practical trade test. Locked to
+    # FAILED after 3 unsuccessful attempts (see intake/views.py trade-test flow).
+    trade_test_status = models.CharField(
+        max_length=10,
+        choices=TradeTestStatus.choices,
+        default=TradeTestStatus.PENDING,
     )
     # The vendor/contractor this worker is pre-assigned to. Field Officers create
     # workers in the master registry and stamp this ownership.
@@ -315,20 +347,15 @@ class Worker(models.Model):
         else:
             add("POLICE", "Police Verification", True)
 
-        # --- Pillars 3 & 4: Trade Test + Safety Training videos ---
-        progress = {p.video_type: p for p in self.video_progress.all()}
-        for vtype, label in (
-            ("TRADE_TEST", "Trade Test Video"),
-            ("SAFETY_TRAINING", "Safety Training Video"),
-        ):
-            vp = progress.get(vtype)
-            if vp is None:
-                add(f"VIDEO_{vtype}", label, False, "INCOMPLETE", "Not started (0%).")
-            elif not vp.is_completed or vp.progress_percentage < 100:
-                add(f"VIDEO_{vtype}", label, False, "INCOMPLETE",
-                    f"Only {vp.progress_percentage}% watched.")
-            else:
-                add(f"VIDEO_{vtype}", label, True)
+        # --- Pillar 3: Trade Test (Field-Officer-administered practical exam) ---
+        if self.trade_test_status == Worker.TradeTestStatus.PASSED:
+            add("TRADE_TEST", "Trade Test", True)
+        elif self.trade_test_status == Worker.TradeTestStatus.FAILED:
+            add("TRADE_TEST", "Trade Test", False, "FAILED",
+                "Failed all 3 trade-test attempts — profile locked.")
+        else:
+            add("TRADE_TEST", "Trade Test", False, "NOT_PASSED",
+                "Practical trade test not yet passed.")
 
         return gaps, satisfied
 
@@ -542,28 +569,66 @@ class IntakePoliceVerification(models.Model):
         return f"PVC · {self.worker.name} · exp {self.expiry_date}"
 
 
-class IntakeVideoProgress(models.Model):
-    """Per-worker watch progress for a mandatory training/test video."""
+# ---------------------------------------------------------------------------
+# Trade test — Field-Officer-administered, on-the-spot practical MCQ exam
+# ---------------------------------------------------------------------------
+class TradeTestQuestion(models.Model):
+    """A role-specific, image-aided multiple-choice question.
 
-    class VideoType(models.TextChoices):
-        TRADE_TEST = "TRADE_TEST", "Trade Test"
-        SAFETY_TRAINING = "SAFETY_TRAINING", "Safety Training"
+    The image is a *visual aid* (a valve, coloured wires, a hazard) so a worker
+    with no book training can understand the plain-language question — not merely
+    a "name this object" prompt.
+    """
 
-    worker = models.ForeignKey(
-        Worker, on_delete=models.CASCADE, related_name="video_progress"
-    )
-    video_type = models.CharField(max_length=20, choices=VideoType.choices)
-    progress_percentage = models.PositiveIntegerField(default=0)
-    is_completed = models.BooleanField(default=False)
-    updated_at = models.DateTimeField(auto_now=True)
+    class Category(models.TextChoices):
+        MECHANICAL = "MECHANICAL", "Mechanical"
+        CIVIL = "CIVIL", "Civil"
+        ELECTRICAL = "ELECTRICAL", "Electrical"
+
+    class Option(models.TextChoices):
+        A = "A", "A"
+        B = "B", "B"
+        C = "C", "C"
+        D = "D", "D"
+
+    skill_type = models.CharField(max_length=12, choices=Category.choices, db_index=True)
+    question_text = models.TextField()
+    # A URL or a self-contained data: URI (SVG diagram) — hence TextField, not URLField.
+    image_url = models.TextField(blank=True, default="")
+    option_a = models.CharField(max_length=200)
+    option_b = models.CharField(max_length=200)
+    option_c = models.CharField(max_length=200)
+    option_d = models.CharField(max_length=200)
+    correct_option = models.CharField(max_length=1, choices=Option.choices)
+    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = "intake_video_progress"
+        db_table = "trade_test_questions"
+        indexes = [models.Index(fields=["skill_type"])]
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return f"[{self.skill_type}] {self.question_text[:50]}"
+
+
+class TradeTestAttempt(models.Model):
+    """One historical exam attempt for a worker (max 3 per worker)."""
+
+    worker = models.ForeignKey(
+        Worker, on_delete=models.CASCADE, related_name="trade_test_attempts"
+    )
+    attempt_number = models.PositiveSmallIntegerField()  # 1, 2 or 3
+    score = models.PositiveSmallIntegerField()  # out of 5
+    is_passed = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "trade_test_attempts"
+        ordering = ["worker", "attempt_number"]
         constraints = [
             models.UniqueConstraint(
-                fields=["worker", "video_type"], name="uq_worker_video_type"
+                fields=["worker", "attempt_number"], name="uq_worker_attempt_number"
             )
         ]
 
     def __str__(self) -> str:  # pragma: no cover - trivial
-        return f"{self.get_video_type_display()} · {self.worker.name} · {self.progress_percentage}%"
+        return f"{self.worker.name} · attempt {self.attempt_number} · {self.score}/5"

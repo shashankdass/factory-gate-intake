@@ -6,10 +6,10 @@ from .models import (
     IntakeListWorker,
     IntakeMedicalRecord,
     IntakePoliceVerification,
-    IntakeVideoProgress,
     Project,
     ProjectRequirement,
     RequirementMaster,
+    TradeTestQuestion,
     User,
     Worker,
     WorkerDocument,
@@ -90,9 +90,8 @@ class WorkerDocumentSerializer(serializers.ModelSerializer):
 
 class WorkerSerializer(serializers.ModelSerializer):
     documents = WorkerDocumentSerializer(many=True, read_only=True)
-    # Read-only per-worker video status, so dashboards can show completion
-    # without hosting a player. (SerializerMethodField sidesteps definition order.)
-    video_progress = serializers.SerializerMethodField()
+    # Trade-test status + attempts used, so dashboards can show exam progress.
+    trade_test_attempts = serializers.SerializerMethodField()
 
     class Meta:
         model = Worker
@@ -104,20 +103,14 @@ class WorkerSerializer(serializers.ModelSerializer):
             "status",
             "contractor",
             "documents",
-            "video_progress",
+            "trade_test_status",
+            "trade_test_attempts",
             "created_at",
         ]
-        read_only_fields = ["created_at"]
+        read_only_fields = ["created_at", "trade_test_status"]
 
-    def get_video_progress(self, obj):
-        return [
-            {
-                "video_type": v.video_type,
-                "progress_percentage": v.progress_percentage,
-                "is_completed": v.is_completed,
-            }
-            for v in obj.video_progress.all()
-        ]
+    def get_trade_test_attempts(self, obj):
+        return obj.trade_test_attempts.count()
 
 
 class IntakeListWorkerSerializer(serializers.ModelSerializer):
@@ -191,15 +184,19 @@ class IntakePoliceVerificationSerializer(serializers.ModelSerializer):
         read_only_fields = ["expiry_date"]
 
 
-class IntakeVideoProgressSerializer(serializers.ModelSerializer):
+class TradeTestQuestionSerializer(serializers.ModelSerializer):
+    """Public question shape sent to the exam UI — deliberately WITHOUT the
+    correct_option (never leak answers to the client; scoring is server-side)."""
+
     class Meta:
-        model = IntakeVideoProgress
+        model = TradeTestQuestion
         fields = [
             "id",
-            "worker",
-            "video_type",
-            "progress_percentage",
-            "is_completed",
-            "updated_at",
+            "skill_type",
+            "question_text",
+            "image_url",
+            "option_a",
+            "option_b",
+            "option_c",
+            "option_d",
         ]
-        read_only_fields = ["is_completed", "updated_at"]

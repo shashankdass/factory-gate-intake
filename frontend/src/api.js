@@ -103,8 +103,11 @@ export const api = {
       token,
       isForm: true,
     }),
-  videoHeartbeat: (token, body) =>
-    request('/intake/video-heartbeat/', { method: 'POST', body, token }),
+  // Trade test (Field Officer administered practical MCQ exam)
+  tradeTestStart: (token, workerId) =>
+    request(`/trade-test/start/?worker_id=${workerId}`, { token }),
+  tradeTestSubmit: (token, body) =>
+    request('/trade-test/submit-attempt/', { method: 'POST', body, token }),
   // Real OCR on an uploaded scan → prefill fields for the given doc_type.
   ocrExtract: (token, formData) =>
     request('/intake/ocr-extract/', {

@@ -57,13 +57,19 @@ urlpatterns = [
         name="verify-document",
     ),
     path(
-        "intake/video-heartbeat/",
-        views.VideoHeartbeatView.as_view(),
-        name="video-heartbeat",
-    ),
-    path(
         "intake/ocr-extract/",
         views.OcrExtractView.as_view(),
         name="ocr-extract",
+    ),
+    # Trade test (Field Officer administered practical MCQ exam)
+    path(
+        "trade-test/start/",
+        views.TradeTestStartView.as_view(),
+        name="trade-test-start",
+    ),
+    path(
+        "trade-test/submit-attempt/",
+        views.TradeTestSubmitView.as_view(),
+        name="trade-test-submit",
     ),
 ]

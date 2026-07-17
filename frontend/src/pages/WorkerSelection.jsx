@@ -9,6 +9,7 @@ const REASON_LABEL = {
   PENDING: 'Pending review',
   FAILED: 'Failed',
   INCOMPLETE: 'Incomplete',
+  NOT_PASSED: 'Not passed',
 }
 
 // Contractor dashboard: pick a project, see pre-assigned workers split into

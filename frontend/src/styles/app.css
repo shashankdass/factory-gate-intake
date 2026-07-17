@@ -1033,3 +1033,145 @@ textarea {
   gap: 12px;
   margin-bottom: 12px;
 }
+
+/* Trade-test intake gap chip */
+.chip.not_passed {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+/* ---------------- Trade Test panel ---------------- */
+.tt-idle,
+.tt-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.tt-exam {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  max-width: 560px;
+}
+.tt-progress {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.tt-dots {
+  display: flex;
+  gap: 6px;
+}
+.tt-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+.tt-dot.done {
+  background: var(--green);
+}
+.tt-dot.on {
+  box-shadow: 0 0 0 2px var(--blue);
+}
+.tt-image {
+  background: #fff;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  padding: 8px;
+  display: flex;
+  justify-content: center;
+}
+.tt-image img {
+  width: 100%;
+  max-width: 420px;
+  height: auto;
+  border-radius: 6px;
+}
+.tt-question {
+  font-size: 18px;
+  font-weight: 700;
+  margin: 14px 0;
+}
+.tt-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+@media (max-width: 560px) {
+  .tt-options {
+    grid-template-columns: 1fr;
+  }
+}
+.tt-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  border: 1px solid var(--border);
+  background: #fff;
+  padding: 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: 600;
+}
+.tt-option:hover {
+  border-color: var(--blue);
+}
+.tt-option.chosen {
+  border-color: var(--blue);
+  background: #eff6ff;
+}
+.tt-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--text);
+  color: #fff;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.tt-hint {
+  margin-top: 10px;
+  font-size: 12px;
+}
+.tt-result {
+  border-radius: 14px;
+  padding: 26px;
+  color: #fff;
+  max-width: 560px;
+  text-align: center;
+}
+.tt-result.pass {
+  background: linear-gradient(160deg, #059669, #047857);
+}
+.tt-result.fail {
+  background: linear-gradient(160deg, #d97706, #b45309);
+}
+.tt-result-main {
+  font-size: 40px;
+  font-weight: 900;
+  letter-spacing: 1px;
+}
+.tt-result-sub {
+  font-size: 18px;
+  font-weight: 700;
+  opacity: 0.95;
+  margin-top: 4px;
+}
+.tt-result-note {
+  margin: 10px 0 16px;
+  opacity: 0.92;
+}
+.tt-result .btn.primary {
+  background: #fff;
+  color: var(--text);
+}

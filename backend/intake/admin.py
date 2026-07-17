@@ -6,10 +6,11 @@ from .models import (
     IntakeListWorker,
     IntakeMedicalRecord,
     IntakePoliceVerification,
-    IntakeVideoProgress,
     Project,
     ProjectRequirement,
     RequirementMaster,
+    TradeTestAttempt,
+    TradeTestQuestion,
     User,
     Worker,
     WorkerDocument,
@@ -83,7 +84,14 @@ class IntakePoliceVerificationAdmin(admin.ModelAdmin):
     list_display = ("worker", "certificate_number", "issue_date", "expiry_date", "verification_status")
 
 
-@admin.register(IntakeVideoProgress)
-class IntakeVideoProgressAdmin(admin.ModelAdmin):
-    list_display = ("worker", "video_type", "progress_percentage", "is_completed")
-    list_filter = ("video_type", "is_completed")
+@admin.register(TradeTestQuestion)
+class TradeTestQuestionAdmin(admin.ModelAdmin):
+    list_display = ("id", "skill_type", "question_text", "correct_option")
+    list_filter = ("skill_type",)
+    search_fields = ("question_text",)
+
+
+@admin.register(TradeTestAttempt)
+class TradeTestAttemptAdmin(admin.ModelAdmin):
+    list_display = ("worker", "attempt_number", "score", "is_passed", "created_at")
+    list_filter = ("is_passed",)

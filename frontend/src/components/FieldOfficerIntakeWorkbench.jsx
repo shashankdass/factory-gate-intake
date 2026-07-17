@@ -25,7 +25,7 @@ const SAMPLES = [
   { key: 'pvc_valid', label: 'Sample Valid PVC', doc: 'POLICE:' },
 ]
 
-const VIDEO_SRC = 'https://www.w3schools.com/html/mov_bbb.mp4'
+const OPTION_KEYS = ['A', 'B', 'C', 'D']
 
 // --- Reusable hook: is an ISO date string more than 365 days old? ----------
 function useExpiryCheck(isoDate) {
@@ -415,7 +415,11 @@ export default function FieldOfficerIntakeWorkbench() {
         </div>
       </div>
 
-      <VideoStatusTracker token={token} />
+      <TradeTestPanel
+        token={token}
+        worker={workers.find((w) => w.id === workerId) || null}
+        onChanged={() => loadWorkers(workerId)}
+      />
     </div>
   )
 }
@@ -599,203 +603,221 @@ function PoliceForm({ form, setField }) {
   )
 }
 
-// ---------------------------------------------------------------------------
-// Read-only completion tracker. Videos are ASSIGNED to each worker; the worker
-// watches (kiosk launcher below), the Field Officer only monitors status.
-// ---------------------------------------------------------------------------
-const VIDEO_TYPES = [
-  { type: 'TRADE_TEST', label: 'Trade Test' },
-  { type: 'SAFETY_TRAINING', label: 'Safety Training' },
-]
 
-function VideoStatusTracker({ token }) {
-  const [workers, setWorkers] = useState([])
-  const [modal, setModal] = useState(null) // { worker, videoType, label, initialPct }
+// ---------------------------------------------------------------------------
+// Trade test — Field Officer administers a 5-question practical exam on the spot.
+// ---------------------------------------------------------------------------
+function TradeTestPanel({ token, worker, onChanged }) {
+  const [phase, setPhase] = useState('idle') // idle | testing | result
+  const [session, setSession] = useState(null) // { questions, attempt_number, ... }
+  const [step, setStep] = useState(0)
+  const [answers, setAnswers] = useState({}) // { questionId: 'A' }
+  const [result, setResult] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState(null)
 
-  const load = () => token && api.workers(token).then(setWorkers).catch(() => {})
+  // Reset when the selected worker changes.
   useEffect(() => {
-    load()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token])
+    setPhase('idle')
+    setSession(null)
+    setStep(0)
+    setAnswers({})
+    setResult(null)
+    setErr(null)
+  }, [worker?.id])
 
-  const statusFor = (w, vtype) =>
-    (w.video_progress || []).find((v) => v.video_type === vtype)
+  if (!worker) {
+    return (
+      <div className="wb-videos">
+        <div className="wb-pane-title">Trade Test</div>
+        <div className="muted">Select a worker above to administer their trade test.</div>
+      </div>
+    )
+  }
 
-  const closeModal = () => {
-    setModal(null)
-    load() // refresh statuses after a watch session
+  const status = worker.trade_test_status
+  const attemptsUsed = worker.trade_test_attempts ?? 0
+
+  async function start() {
+    setBusy(true)
+    setErr(null)
+    try {
+      const data = await api.tradeTestStart(token, worker.id)
+      setSession(data)
+      setAnswers({})
+      setStep(0)
+      setResult(null)
+      setPhase('testing')
+    } catch (e) {
+      setErr(e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function submit(finalAnswers) {
+    setBusy(true)
+    setErr(null)
+    try {
+      const payload = {
+        worker_id: worker.id,
+        answers: Object.entries(finalAnswers).map(([question_id, selected_option]) => ({
+          question_id: Number(question_id),
+          selected_option,
+        })),
+      }
+      const res = await api.tradeTestSubmit(token, payload)
+      setResult(res)
+      setPhase('result')
+      onChanged?.()
+    } catch (e) {
+      setErr(e.message)
+      setPhase('idle')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function choose(questionId, opt) {
+    const next = { ...answers, [questionId]: opt }
+    setAnswers(next)
+    if (step < session.questions.length - 1) {
+      setStep(step + 1)
+    } else {
+      submit(next) // last answer → auto-submit
+    }
   }
 
   return (
     <div className="wb-videos">
-      <div className="wb-pane-title">Video Completion Tracker (assigned per worker)</div>
-      <div className="wb-track-scroll">
-        <table className="video-table">
-          <thead>
-            <tr>
-              <th>Worker</th>
-              {VIDEO_TYPES.map((v) => (
-                <th key={v.type}>{v.label}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {workers.map((w) => (
-              <tr key={w.id}>
-                <td>
-                  <strong>{w.name}</strong>
-                  <div className="muted">{w.skill_type}</div>
-                </td>
-                {VIDEO_TYPES.map((v) => {
-                  const s = statusFor(w, v.type)
-                  const done = !!s?.is_completed
-                  const pct = s?.progress_percentage ?? 0
-                  return (
-                    <td key={v.type}>
-                      <span className={`badge ${done ? 'green' : 'amber'}`}>
-                        {done ? '✅ Completed' : `⏳ ${pct}%`}
-                      </span>
-                      {!done && (
-                        <button
-                          className="btn small"
-                          onClick={() =>
-                            setModal({
-                              worker: w,
-                              videoType: v.type,
-                              label: v.label,
-                              initialPct: pct,
-                            })
-                          }
-                        >
-                          ▶ Play for worker
-                        </button>
-                      )}
-                    </td>
-                  )
-                })}
-              </tr>
-            ))}
-            {workers.length === 0 && (
-              <tr>
-                <td colSpan={3} className="muted">
-                  No workers yet.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+      <div className="wb-pane-title">Trade Test — {worker.name}</div>
+      {err && <div className="alert error">⚠ {err}</div>}
 
-      {modal && (
-        <div className="wb-modal-backdrop" onClick={closeModal}>
-          <div className="wb-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="wb-modal-head">
-              <strong>
-                {modal.label} — {modal.worker.name}
-              </strong>
-              <button className="btn small ghost" onClick={closeModal}>
-                Close
+      {phase === 'idle' && (
+        <div className="tt-idle">
+          {status === 'PASSED' && (
+            <div className="tt-status">
+              <span className="badge green">✅ Passed</span>
+              <span className="muted">This worker has passed the trade test.</span>
+            </div>
+          )}
+          {status === 'FAILED' && (
+            <div className="tt-status">
+              <span className="badge red">✖ Failed — locked</span>
+              <span className="muted">Failed all 3 attempts. Profile is permanently locked.</span>
+            </div>
+          )}
+          {status === 'PENDING' && (
+            <div className="tt-status">
+              <span className="badge amber">Not yet taken</span>
+              <span className="muted">Attempts used: {attemptsUsed} / 3</span>
+              <button className="btn primary" disabled={busy} onClick={start}>
+                {busy ? 'Loading…' : '▶ Start Trade Test'}
               </button>
             </div>
-            <p className="muted">
-              Kiosk mode — hand the screen to the worker. Forward-seeking is blocked.
-            </p>
-            <VideoPlayer
-              token={token}
-              workerId={modal.worker.id}
-              videoType={modal.videoType}
-              initialPct={modal.initialPct}
-              onDone={load}
-            />
-          </div>
+          )}
         </div>
+      )}
+
+      {phase === 'testing' && session && (
+        <TradeTestStepper
+          session={session}
+          step={step}
+          answers={answers}
+          onChoose={choose}
+          busy={busy}
+        />
+      )}
+
+      {phase === 'result' && result && (
+        <TradeTestResult result={result} onRetry={start} busy={busy} />
       )}
     </div>
   )
 }
 
-// The seek-locked player the worker actually watches. Resumes from prior progress
-// and pushes heartbeats. (Later: this same player moves to a public /watch link.)
-function VideoPlayer({ token, workerId, videoType, initialPct = 0, onDone }) {
-  const videoRef = useRef(null)
-  const maxWatched = useRef(0)
-  const lastSent = useRef(initialPct)
-  const [progress, setProgress] = useState(initialPct)
-  const [completed, setCompleted] = useState(initialPct >= 100)
-
-  const push = async (pct) => {
-    if (!workerId) return
-    try {
-      const r = await api.videoHeartbeat(token, {
-        worker: workerId,
-        video_type: videoType,
-        progress_percentage: pct,
-      })
-      setCompleted(r.is_completed)
-      onDone?.()
-    } catch {
-      /* heartbeat is best-effort */
-    }
-  }
-
-  // Resume: place the playhead at the previously-watched watermark.
-  const onLoadedMetadata = (e) => {
-    const v = e.target
-    if (initialPct > 0 && v.duration) {
-      const t = (initialPct / 100) * v.duration
-      maxWatched.current = t
-      v.currentTime = t
-    }
-  }
-
-  const blockForwardSeek = (v) => {
-    if (v.currentTime > maxWatched.current + 1.5) {
-      v.currentTime = maxWatched.current
-      return true
-    }
-    return false
-  }
-
-  const onTimeUpdate = (e) => {
-    const v = e.target
-    if (!v.duration) return
-    if (blockForwardSeek(v)) return
-    maxWatched.current = Math.max(maxWatched.current, v.currentTime)
-    const pct = Math.min(100, Math.floor((maxWatched.current / v.duration) * 100))
-    setProgress(pct)
-    if (pct >= lastSent.current + 5 && pct < 100) {
-      lastSent.current = pct
-      push(pct)
-    }
-  }
-
-  const onEnded = () => {
-    const v = videoRef.current
-    if (v) maxWatched.current = v.duration
-    setProgress(100)
-    lastSent.current = 100
-    push(100)
-  }
-
+function TradeTestStepper({ session, step, answers, onChoose, busy }) {
+  const q = session.questions[step]
+  const total = session.questions.length
   return (
-    <div className={`wb-video ${completed ? 'done' : ''}`}>
-      <video
-        ref={videoRef}
-        src={VIDEO_SRC}
-        controls
-        playsInline
-        preload="metadata"
-        onLoadedMetadata={onLoadedMetadata}
-        onTimeUpdate={onTimeUpdate}
-        onSeeking={(e) => blockForwardSeek(e.target)}
-        onEnded={onEnded}
-      />
-      <div className="wb-progress">
-        <div className="wb-progress-fill" style={{ width: `${progress}%` }} />
+    <div className="tt-exam">
+      <div className="tt-progress">
+        <span className="muted">
+          Attempt {session.attempt_number} · Question {step + 1} of {total} ·
+          need {session.pass_mark}/{total} to pass
+        </span>
+        <div className="tt-dots">
+          {session.questions.map((qq, i) => (
+            <span
+              key={qq.id}
+              className={`tt-dot ${i === step ? 'on' : ''} ${answers[qq.id] ? 'done' : ''}`}
+            />
+          ))}
+        </div>
       </div>
-      <div className="muted wb-hint">
-        {completed ? 'Completed ✅' : `${progress}% watched — no skipping ahead.`}
+
+      <div className="tt-image">
+        <img src={q.image_url} alt="question illustration" />
       </div>
+
+      <div className="tt-question">{q.question_text}</div>
+
+      <div className="tt-options">
+        {OPTION_KEYS.map((k) => {
+          const label = q[`option_${k.toLowerCase()}`]
+          if (!label) return null
+          return (
+            <button
+              key={k}
+              className={`tt-option ${answers[q.id] === k ? 'chosen' : ''}`}
+              disabled={busy}
+              onClick={() => onChoose(q.id, k)}
+            >
+              <span className="tt-key">{k}</span>
+              <span>{label}</span>
+            </button>
+          )
+        })}
+      </div>
+      <div className="muted tt-hint">
+        Read the question aloud, then tap the worker's spoken answer.
+      </div>
+    </div>
+  )
+}
+
+function TradeTestResult({ result, onRetry, busy }) {
+  const passed = result.is_passed
+  const canRetry = !passed && !result.locked && result.attempts_remaining > 0
+  return (
+    <div className={`tt-result ${passed ? 'pass' : 'fail'}`}>
+      {passed ? (
+        <>
+          <div className="tt-result-main">PASSED</div>
+          <div className="tt-result-sub">Score: {result.score}/{result.total}</div>
+        </>
+      ) : (
+        <>
+          <div className="tt-result-main">FAILED</div>
+          <div className="tt-result-sub">
+            Score {result.score}/{result.total} · Attempt {result.attempt_number} of 3 used
+          </div>
+          {result.locked ? (
+            <div className="tt-result-note">
+              All 3 attempts used — profile permanently locked as Failed.
+            </div>
+          ) : (
+            <div className="tt-result-note">
+              {result.attempts_remaining} attempt(s) remaining.
+            </div>
+          )}
+        </>
+      )}
+      {canRetry && (
+        <button className="btn primary" disabled={busy} onClick={onRetry}>
+          {busy ? 'Loading…' : '↻ Retry test'}
+        </button>
+      )}
     </div>
   )
 }

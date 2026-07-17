@@ -39,24 +39,30 @@ from .models import (
     IntakeListWorker,
     IntakeMedicalRecord,
     IntakePoliceVerification,
-    IntakeVideoProgress,
     Project,
     RequirementMaster,
+    TradeTestAttempt,
+    TradeTestQuestion,
     User,
     Worker,
     WorkerDocument,
+    category_for_skill,
 )
 from .serializers import (
     IntakeListSerializer,
     IntakeMedicalRecordSerializer,
     IntakePoliceVerificationSerializer,
-    IntakeVideoProgressSerializer,
     ProjectSerializer,
     RequirementMasterSerializer,
+    TradeTestQuestionSerializer,
     UserSerializer,
     WorkerDocumentSerializer,
     WorkerSerializer,
 )
+
+TRADE_TEST_QUESTION_COUNT = 5
+TRADE_TEST_PASS_MARK = 3
+TRADE_TEST_MAX_ATTEMPTS = 3
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +203,7 @@ class EligibleWorkersView(APIView):
 
         # Prefetch all pillar relations so each compliance evaluation avoids N+1.
         workers_qs = workers_qs.prefetch_related(
-            "documents", "video_progress", "medical_records", "police_verifications"
+            "documents", "medical_records", "police_verifications", "trade_test_attempts"
         )
 
         required = [
@@ -359,7 +365,7 @@ class WorkerListView(APIView):
             qs = Worker.objects.filter(contractor=request.user)
         else:
             qs = Worker.objects.all()
-        qs = qs.prefetch_related("documents", "video_progress")
+        qs = qs.prefetch_related("documents", "trade_test_attempts")
         return Response(WorkerSerializer(qs, many=True).data)
 
     def post(self, request):
@@ -1038,16 +1044,85 @@ class VerifyDocumentView(APIView):
         )
 
 
-class VideoHeartbeatView(APIView):
+# ---------------------------------------------------------------------------
+# Trade test — Field-Officer-administered practical MCQ exam
+# ---------------------------------------------------------------------------
+def _trade_test_state(worker):
+    """Current attempt bookkeeping for a worker."""
+    attempts_used = worker.trade_test_attempts.count()
+    return {
+        "attempts_used": attempts_used,
+        "attempts_remaining": max(0, TRADE_TEST_MAX_ATTEMPTS - attempts_used),
+        "status": worker.trade_test_status,
+        "passed": worker.trade_test_status == Worker.TradeTestStatus.PASSED,
+        "locked": worker.trade_test_status == Worker.TradeTestStatus.FAILED,
+    }
+
+
+class TradeTestStartView(APIView):
     """
-    POST /api/intake/video-heartbeat/   (Field Officer)
+    GET /api/trade-test/start/?worker_id=<id>   (Field Officer)
 
-    Maps an HTML5 video timeline to persisted progress. ``is_completed`` flips to
-    True only when ``progress_percentage`` reaches exactly 100. Progress never
-    moves backwards (guards against a page reload resetting a completed video).
+    Validates the worker has remaining attempts and has not already passed, then
+    returns exactly 5 random questions for the worker's skill category — WITHOUT
+    the correct answers.
+    """
 
-    Body: {"worker": <id>, "video_type": "TRADE_TEST"|"SAFETY_TRAINING",
-           "progress_percentage": <0-100>}
+    def get(self, request):
+        denied = _require_role(request, User.Role.FIELD_OFFICER)
+        if denied:
+            return denied
+
+        worker = get_object_or_404(Worker, pk=request.query_params.get("worker_id"))
+        state = _trade_test_state(worker)
+
+        if state["passed"]:
+            return Response(
+                {"detail": "This worker has already passed the trade test.", **state},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if state["locked"] or state["attempts_remaining"] <= 0:
+            return Response(
+                {"detail": "No attempts remaining — profile is locked as Failed.", **state},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        category = category_for_skill(worker.skill_type)
+        questions = list(
+            TradeTestQuestion.objects.filter(skill_type=category).order_by("?")[
+                :TRADE_TEST_QUESTION_COUNT
+            ]
+        )
+        if len(questions) < TRADE_TEST_QUESTION_COUNT:
+            return Response(
+                {
+                    "detail": f"Only {len(questions)} questions exist for {category}; "
+                    f"need {TRADE_TEST_QUESTION_COUNT}. Seed more questions."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(
+            {
+                "worker_id": worker.id,
+                "worker_name": worker.name,
+                "category": category,
+                "attempt_number": state["attempts_used"] + 1,
+                "attempts_remaining": state["attempts_remaining"],
+                "pass_mark": TRADE_TEST_PASS_MARK,
+                "questions": TradeTestQuestionSerializer(questions, many=True).data,
+            }
+        )
+
+
+class TradeTestSubmitView(APIView):
+    """
+    POST /api/trade-test/submit-attempt/   (Field Officer)
+
+    Body: {"worker_id": <id>, "answers": [{"question_id": <id>, "selected_option": "A"}]}
+
+    Scores server-side, records the attempt, and updates the worker's trade-test
+    status: PASSED at >= 3/5, or FAILED (locked) once the 3rd attempt is used up.
     """
 
     def post(self, request):
@@ -1055,34 +1130,69 @@ class VideoHeartbeatView(APIView):
         if denied:
             return denied
 
-        worker = get_object_or_404(Worker, pk=request.data.get("worker"))
-        video_type = request.data.get("video_type")
-        if video_type not in IntakeVideoProgress.VideoType.values:
+        worker = get_object_or_404(Worker, pk=request.data.get("worker_id"))
+        state = _trade_test_state(worker)
+        if state["passed"]:
             return Response(
-                {
-                    "detail": f"video_type must be one of "
-                    f"{IntakeVideoProgress.VideoType.values}."
-                },
+                {"detail": "Worker has already passed.", **state},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if state["locked"] or state["attempts_remaining"] <= 0:
+            return Response(
+                {"detail": "No attempts remaining — profile is locked.", **state},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        try:
-            pct = int(request.data.get("progress_percentage", 0))
-        except (TypeError, ValueError):
+        answers = request.data.get("answers") or []
+        if not isinstance(answers, list) or not answers:
             return Response(
-                {"detail": "progress_percentage must be an integer."},
+                {"detail": "answers must be a non-empty list."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        pct = max(0, min(100, pct))
 
-        vp, _ = IntakeVideoProgress.objects.get_or_create(
-            worker=worker, video_type=video_type
+        # Score server-side against the stored correct_option (never trust client).
+        selected = {}
+        for a in answers:
+            try:
+                selected[int(a.get("question_id"))] = (a.get("selected_option") or "").upper()
+            except (TypeError, ValueError):
+                continue
+
+        questions = TradeTestQuestion.objects.filter(id__in=selected.keys())
+        score = sum(
+            1 for q in questions if selected.get(q.id) == q.correct_option
         )
-        # Monotonic: never regress a previously higher watermark.
-        vp.progress_percentage = max(vp.progress_percentage, pct)
-        vp.is_completed = vp.progress_percentage >= 100
-        vp.save()
-        return Response(IntakeVideoProgressSerializer(vp).data)
+        passed = score >= TRADE_TEST_PASS_MARK
+        attempt_number = state["attempts_used"] + 1
+
+        with transaction.atomic():
+            TradeTestAttempt.objects.create(
+                worker=worker,
+                attempt_number=attempt_number,
+                score=score,
+                is_passed=passed,
+            )
+            if passed:
+                worker.trade_test_status = Worker.TradeTestStatus.PASSED
+            elif attempt_number >= TRADE_TEST_MAX_ATTEMPTS:
+                worker.trade_test_status = Worker.TradeTestStatus.FAILED
+            worker.save(update_fields=["trade_test_status"])
+
+        attempts_remaining = max(0, TRADE_TEST_MAX_ATTEMPTS - attempt_number)
+        return Response(
+            {
+                "worker_id": worker.id,
+                "score": score,
+                "total": TRADE_TEST_QUESTION_COUNT,
+                "pass_mark": TRADE_TEST_PASS_MARK,
+                "is_passed": passed,
+                "attempt_number": attempt_number,
+                "attempts_remaining": attempts_remaining,
+                "trade_test_status": worker.trade_test_status,
+                "locked": worker.trade_test_status == Worker.TradeTestStatus.FAILED,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 # ---------------------------------------------------------------------------
