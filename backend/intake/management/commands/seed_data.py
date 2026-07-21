@@ -28,6 +28,7 @@ from intake.models import (
     Project,
     ProjectRequirement,
     RequirementMaster,
+    SafetyTrainingProgress,
     TradeTestAttempt,
     TradeTestQuestion,
     User,
@@ -330,14 +331,19 @@ class Command(BaseCommand):
                     verification_status=pol["status"],
                 )
 
-            # Trade test: mark Ravi passed (with a historical attempt) so he stays
-            # Ready; leave the rest PENDING so the Field Officer can administer it.
+            # Trade test + safety video: mark Ravi complete so he stays Ready;
+            # leave the rest for the Field Officer to administer.
             if passed and not worker.trade_test_attempts.exists():
                 TradeTestAttempt.objects.create(
                     worker=worker, attempt_number=1, score=4, is_passed=True
                 )
                 worker.trade_test_status = Worker.TradeTestStatus.PASSED
                 worker.save(update_fields=["trade_test_status"])
+            if passed:
+                SafetyTrainingProgress.objects.get_or_create(
+                    worker=worker,
+                    defaults={"progress_percentage": 100, "is_completed": True},
+                )
 
     # -- Trade test question bank (image-aided practical MCQs) ---------------
     def _seed_trade_test_questions(self) -> None:

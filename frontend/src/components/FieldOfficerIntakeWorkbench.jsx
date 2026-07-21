@@ -27,6 +27,10 @@ const SAMPLES = [
 
 const OPTION_KEYS = ['A', 'B', 'C', 'D']
 
+// Sample safety induction clip. Swap for a self-hosted asset in production;
+// the seek-lock + heartbeat logic works with any source.
+const SAFETY_VIDEO_SRC = 'https://www.w3schools.com/html/mov_bbb.mp4'
+
 // --- Reusable hook: is an ISO date string more than 365 days old? ----------
 function useExpiryCheck(isoDate) {
   return useMemo(() => {
@@ -53,9 +57,12 @@ export default function FieldOfficerIntakeWorkbench() {
   const [contractors, setContractors] = useState([])
   const [showAdd, setShowAdd] = useState(false)
   const [newWorker, setNewWorker] = useState({ name: '', aadhar_number: '', skill_type: '', contractor: '' })
+  const [newAadhaarScan, setNewAadhaarScan] = useState(null) // { file, url }
+  const [addExtracting, setAddExtracting] = useState(false)
   const [addBusy, setAddBusy] = useState(false)
   const [addMsg, setAddMsg] = useState(null)
   const fileInputRef = useRef(null)
+  const newScanInputRef = useRef(null)
 
   const current = DOC_TYPES.find((d) => d.value === docSel) || null
   const formType = current?.formType || null
@@ -74,6 +81,43 @@ export default function FieldOfficerIntakeWorkbench() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token])
 
+  function onNewAadhaarFile(f) {
+    if (!f) return
+    if (newAadhaarScan?.url) URL.revokeObjectURL(newAadhaarScan.url)
+    setNewAadhaarScan({ file: f, url: URL.createObjectURL(f) })
+    setAddMsg(null)
+  }
+
+  // OCR the uploaded Aadhaar card and prefill name + number for the officer to verify.
+  async function readNewAadhaar() {
+    if (!newAadhaarScan?.file) return
+    setAddExtracting(true)
+    setAddMsg(null)
+    try {
+      const fd = new FormData()
+      fd.append('file', newAadhaarScan.file)
+      fd.append('doc_type', 'IDENTITY')
+      fd.append('requirement_name', 'Aadhar')
+      const res = await api.ocrExtract(token, fd)
+      setNewWorker((w) => ({
+        ...w,
+        name: res.fields.name || w.name,
+        aadhar_number: (res.fields.aadhar_number || w.aadhar_number || '')
+          .replace(/\D/g, '')
+          .slice(0, 12),
+      }))
+      setAddMsg(
+        res.note
+          ? { tone: 'error', text: res.note }
+          : { tone: 'success', text: 'Read from scan — verify the name and Aadhar number.' }
+      )
+    } catch (e) {
+      setAddMsg({ tone: 'error', text: e.message })
+    } finally {
+      setAddExtracting(false)
+    }
+  }
+
   async function addWorker() {
     const { name, aadhar_number, skill_type } = newWorker
     if (!name.trim() || !skill_type.trim() || aadhar_number.trim().length !== 12) {
@@ -83,16 +127,40 @@ export default function FieldOfficerIntakeWorkbench() {
     setAddBusy(true)
     setAddMsg(null)
     try {
+      // 1) Create the worker.
       const created = await api.createWorker(token, {
         name: name.trim(),
         aadhar_number: aadhar_number.trim(),
         skill_type: skill_type.trim(),
         contractor: newWorker.contractor || null,
       })
+      // 2) If a scan was provided, verify the Aadhar document in the same flow.
+      let verified = false
+      if (newAadhaarScan?.file) {
+        try {
+          const fd = new FormData()
+          fd.append('worker', created.id)
+          fd.append('doc_type', 'IDENTITY')
+          fd.append('requirement_name', 'Aadhar')
+          fd.append('document_number', aadhar_number.trim())
+          fd.append('file', newAadhaarScan.file)
+          await api.verifyDocumentForm(token, fd)
+          verified = true
+        } catch {
+          /* worker was created; the Aadhar doc can still be added manually */
+        }
+      }
       await loadWorkers(created.id) // add + auto-select the new worker
+      if (newAadhaarScan?.url) URL.revokeObjectURL(newAadhaarScan.url)
+      setNewAadhaarScan(null)
       setNewWorker({ name: '', aadhar_number: '', skill_type: '', contractor: '' })
       setShowAdd(false)
-      setMsg({ tone: 'success', text: `Added ${created.name}. Now upload and verify their documents.` })
+      setMsg({
+        tone: 'success',
+        text: verified
+          ? `Added ${created.name} and verified their Aadhar document.`
+          : `Added ${created.name}. Now upload and verify their documents.`,
+      })
     } catch (e) {
       setAddMsg({ tone: 'error', text: e.message })
     } finally {
@@ -100,8 +168,9 @@ export default function FieldOfficerIntakeWorkbench() {
     }
   }
 
-  // Revoke the object URL when the upload changes / unmounts.
+  // Revoke object URLs when the uploads change / unmount.
   useEffect(() => () => upload?.url && URL.revokeObjectURL(upload.url), [upload])
+  useEffect(() => () => newAadhaarScan?.url && URL.revokeObjectURL(newAadhaarScan.url), [newAadhaarScan])
 
   function selectDocType(value) {
     setDocSel(value)
@@ -261,6 +330,37 @@ export default function FieldOfficerIntakeWorkbench() {
       {showAdd && (
         <div className="wb-addworker">
           <div className="wb-pane-title">Add a new worker to the registry</div>
+
+          <div className="wb-aadhaar-intake">
+            <input
+              ref={newScanInputRef}
+              type="file"
+              accept="image/*,application/pdf"
+              hidden
+              onChange={(e) => onNewAadhaarFile(e.target.files?.[0])}
+            />
+            <button className="btn small" onClick={() => newScanInputRef.current?.click()}>
+              📷 Upload Aadhar card
+            </button>
+            {newAadhaarScan && (
+              <>
+                <button
+                  className="btn small primary"
+                  disabled={addExtracting}
+                  onClick={readNewAadhaar}
+                >
+                  {addExtracting ? 'Reading…' : '🔍 Read name & number from scan'}
+                </button>
+                <span className="muted">{newAadhaarScan.file.name}</span>
+              </>
+            )}
+            {!newAadhaarScan && (
+              <span className="muted">
+                Optional — read the worker's details off the card, then verify below.
+              </span>
+            )}
+          </div>
+
           <div className="wb-add-grid">
             <label className="wb-field">
               <span>Full name</span>
@@ -308,13 +408,17 @@ export default function FieldOfficerIntakeWorkbench() {
           </div>
           <div className="wb-commit-row">
             <button className="btn primary" disabled={addBusy} onClick={addWorker}>
-              {addBusy ? 'Adding…' : 'Create worker'}
+              {addBusy
+                ? 'Adding…'
+                : newAadhaarScan
+                ? 'Create worker + verify Aadhar'
+                : 'Create worker'}
             </button>
             {addMsg && <span className={`inline-msg ${addMsg.tone}`}>{addMsg.text}</span>}
           </div>
           <div className="muted">
-            After creating, the worker is selected below — upload and verify their
-            documents, or assign to a contractor so they appear in that contractor's list.
+            With an Aadhar scan attached, creating the worker also verifies their Aadhar
+            document in one step. Skill and contractor are not on the card — set them here.
           </div>
         </div>
       )}
@@ -416,6 +520,12 @@ export default function FieldOfficerIntakeWorkbench() {
       </div>
 
       <TradeTestPanel
+        token={token}
+        worker={workers.find((w) => w.id === workerId) || null}
+        onChanged={() => loadWorkers(workerId)}
+      />
+
+      <SafetyVideoPanel
         token={token}
         worker={workers.find((w) => w.id === workerId) || null}
         onChanged={() => loadWorkers(workerId)}
@@ -818,6 +928,147 @@ function TradeTestResult({ result, onRetry, busy }) {
           {busy ? 'Loading…' : '↻ Retry test'}
         </button>
       )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Safety Training video — mandatory induction clip. The Field Officer plays it
+// for the selected worker (kiosk); forward-seeking is blocked; progress is
+// pushed to the backend heartbeat until it reaches 100%.
+// ---------------------------------------------------------------------------
+function SafetyVideoPanel({ token, worker, onChanged }) {
+  const [playing, setPlaying] = useState(false)
+
+  useEffect(() => {
+    setPlaying(false)
+  }, [worker?.id])
+
+  if (!worker) {
+    return (
+      <div className="wb-videos">
+        <div className="wb-pane-title">Safety Training Video</div>
+        <div className="muted">Select a worker above to play their safety induction video.</div>
+      </div>
+    )
+  }
+
+  const sv = worker.safety_video || { progress_percentage: 0, is_completed: false }
+
+  return (
+    <div className="wb-videos">
+      <div className="wb-pane-title">Safety Training Video — {worker.name}</div>
+
+      {!playing && (
+        <div className="tt-status">
+          {sv.is_completed ? (
+            <span className="badge green">✅ Watched (100%)</span>
+          ) : (
+            <span className="badge amber">⏳ {sv.progress_percentage}% watched</span>
+          )}
+          <span className="muted">
+            Every worker must watch the safety induction clip in full.
+          </span>
+          {!sv.is_completed && (
+            <button className="btn primary" onClick={() => setPlaying(true)}>
+              ▶ Play safety video for worker
+            </button>
+          )}
+        </div>
+      )}
+
+      {playing && (
+        <SafetyVideoPlayer
+          token={token}
+          workerId={worker.id}
+          initialPct={sv.progress_percentage}
+          onDone={onChanged}
+        />
+      )}
+    </div>
+  )
+}
+
+function SafetyVideoPlayer({ token, workerId, initialPct = 0, onDone }) {
+  const videoRef = useRef(null)
+  const maxWatched = useRef(0)
+  const lastSent = useRef(initialPct)
+  const [progress, setProgress] = useState(initialPct)
+  const [completed, setCompleted] = useState(initialPct >= 100)
+
+  const push = async (pct) => {
+    if (!workerId) return
+    try {
+      const r = await api.safetyVideoHeartbeat(token, {
+        worker: workerId,
+        progress_percentage: pct,
+      })
+      setCompleted(r.is_completed)
+      onDone?.()
+    } catch {
+      /* heartbeat is best-effort */
+    }
+  }
+
+  // Resume from prior progress once metadata (duration) is known.
+  const onLoadedMetadata = (e) => {
+    const v = e.target
+    if (initialPct > 0 && v.duration) {
+      const t = (initialPct / 100) * v.duration
+      maxWatched.current = t
+      v.currentTime = t
+    }
+  }
+
+  const blockForwardSeek = (v) => {
+    if (v.currentTime > maxWatched.current + 1.5) {
+      v.currentTime = maxWatched.current
+      return true
+    }
+    return false
+  }
+
+  const onTimeUpdate = (e) => {
+    const v = e.target
+    if (!v.duration) return
+    if (blockForwardSeek(v)) return
+    maxWatched.current = Math.max(maxWatched.current, v.currentTime)
+    const pct = Math.min(100, Math.floor((maxWatched.current / v.duration) * 100))
+    setProgress(pct)
+    if (pct >= lastSent.current + 5 && pct < 100) {
+      lastSent.current = pct
+      push(pct)
+    }
+  }
+
+  const onEnded = () => {
+    const v = videoRef.current
+    if (v) maxWatched.current = v.duration
+    setProgress(100)
+    lastSent.current = 100
+    push(100)
+  }
+
+  return (
+    <div className={`wb-video ${completed ? 'done' : ''}`}>
+      <p className="muted">Kiosk mode — hand the screen to the worker. Forward-seeking is blocked.</p>
+      <video
+        ref={videoRef}
+        src={SAFETY_VIDEO_SRC}
+        controls
+        playsInline
+        preload="metadata"
+        onLoadedMetadata={onLoadedMetadata}
+        onTimeUpdate={onTimeUpdate}
+        onSeeking={(e) => blockForwardSeek(e.target)}
+        onEnded={onEnded}
+      />
+      <div className="wb-progress">
+        <div className="wb-progress-fill" style={{ width: `${progress}%` }} />
+      </div>
+      <div className="muted wb-hint">
+        {completed ? 'Completed ✅ — safety induction watched in full.' : `${progress}% watched — no skipping ahead.`}
+      </div>
     </div>
   )
 }

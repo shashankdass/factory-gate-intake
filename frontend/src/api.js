@@ -108,6 +108,9 @@ export const api = {
     request(`/trade-test/start/?worker_id=${workerId}`, { token }),
   tradeTestSubmit: (token, body) =>
     request('/trade-test/submit-attempt/', { method: 'POST', body, token }),
+  // Safety induction video watch progress
+  safetyVideoHeartbeat: (token, body) =>
+    request('/safety-video/heartbeat/', { method: 'POST', body, token }),
   // Real OCR on an uploaded scan → prefill fields for the given doc_type.
   ocrExtract: (token, formData) =>
     request('/intake/ocr-extract/', {

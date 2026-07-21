@@ -357,6 +357,18 @@ class Worker(models.Model):
             add("TRADE_TEST", "Trade Test", False, "NOT_PASSED",
                 "Practical trade test not yet passed.")
 
+        # --- Pillar 4: Safety Training video (mandatory induction clip) ---
+        try:
+            sv = self.safety_video
+        except SafetyTrainingProgress.DoesNotExist:
+            sv = None
+        if sv and sv.is_completed and sv.progress_percentage >= 100:
+            add("SAFETY_VIDEO", "Safety Training Video", True)
+        else:
+            pct = sv.progress_percentage if sv else 0
+            add("SAFETY_VIDEO", "Safety Training Video", False, "INCOMPLETE",
+                f"Safety induction video only {pct}% watched.")
+
         return gaps, satisfied
 
     @staticmethod
@@ -632,3 +644,27 @@ class TradeTestAttempt(models.Model):
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return f"{self.worker.name} · attempt {self.attempt_number} · {self.score}/5"
+
+
+# ---------------------------------------------------------------------------
+# Safety Training video — a mandatory induction clip every worker must watch
+# ---------------------------------------------------------------------------
+class SafetyTrainingProgress(models.Model):
+    """Per-worker watch progress for the mandatory safety induction video.
+
+    Distinct from the trade test (a practical exam) and from the Safety Training
+    certificate document — this is the induction clip every worker watches.
+    """
+
+    worker = models.OneToOneField(
+        Worker, on_delete=models.CASCADE, related_name="safety_video"
+    )
+    progress_percentage = models.PositiveIntegerField(default=0)
+    is_completed = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "safety_training_progress"
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return f"Safety video · {self.worker.name} · {self.progress_percentage}%"

@@ -72,4 +72,10 @@ urlpatterns = [
         views.TradeTestSubmitView.as_view(),
         name="trade-test-submit",
     ),
+    # Safety induction video watch progress
+    path(
+        "safety-video/heartbeat/",
+        views.SafetyVideoHeartbeatView.as_view(),
+        name="safety-video-heartbeat",
+    ),
 ]

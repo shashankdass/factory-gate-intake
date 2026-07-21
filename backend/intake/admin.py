@@ -9,6 +9,7 @@ from .models import (
     Project,
     ProjectRequirement,
     RequirementMaster,
+    SafetyTrainingProgress,
     TradeTestAttempt,
     TradeTestQuestion,
     User,
@@ -95,3 +96,9 @@ class TradeTestQuestionAdmin(admin.ModelAdmin):
 class TradeTestAttemptAdmin(admin.ModelAdmin):
     list_display = ("worker", "attempt_number", "score", "is_passed", "created_at")
     list_filter = ("is_passed",)
+
+
+@admin.register(SafetyTrainingProgress)
+class SafetyTrainingProgressAdmin(admin.ModelAdmin):
+    list_display = ("worker", "progress_percentage", "is_completed", "updated_at")
+    list_filter = ("is_completed",)

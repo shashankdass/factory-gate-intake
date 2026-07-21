@@ -1175,3 +1175,16 @@ textarea {
   background: #fff;
   color: var(--text);
 }
+
+/* Add-worker: Aadhaar scan intake row */
+.wb-aadhaar-intake {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px;
+  border: 1px dashed var(--blue);
+  border-radius: 8px;
+  margin-bottom: 12px;
+  background: #eff6ff;
+}

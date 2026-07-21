@@ -1,4 +1,5 @@
 """DRF serializers. Kept thin — heavy logic stays on the models/views."""
+from django.core.exceptions import ObjectDoesNotExist
 from rest_framework import serializers
 
 from .models import (
@@ -92,6 +93,8 @@ class WorkerSerializer(serializers.ModelSerializer):
     documents = WorkerDocumentSerializer(many=True, read_only=True)
     # Trade-test status + attempts used, so dashboards can show exam progress.
     trade_test_attempts = serializers.SerializerMethodField()
+    # Safety induction video watch status.
+    safety_video = serializers.SerializerMethodField()
 
     class Meta:
         model = Worker
@@ -105,12 +108,23 @@ class WorkerSerializer(serializers.ModelSerializer):
             "documents",
             "trade_test_status",
             "trade_test_attempts",
+            "safety_video",
             "created_at",
         ]
         read_only_fields = ["created_at", "trade_test_status"]
 
     def get_trade_test_attempts(self, obj):
         return obj.trade_test_attempts.count()
+
+    def get_safety_video(self, obj):
+        try:
+            sv = obj.safety_video
+        except ObjectDoesNotExist:
+            return {"progress_percentage": 0, "is_completed": False}
+        return {
+            "progress_percentage": sv.progress_percentage,
+            "is_completed": sv.is_completed,
+        }
 
 
 class IntakeListWorkerSerializer(serializers.ModelSerializer):

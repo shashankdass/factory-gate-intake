@@ -41,6 +41,7 @@ from .models import (
     IntakePoliceVerification,
     Project,
     RequirementMaster,
+    SafetyTrainingProgress,
     TradeTestAttempt,
     TradeTestQuestion,
     User,
@@ -202,7 +203,7 @@ class EligibleWorkersView(APIView):
                 workers_qs = workers_qs.filter(contractor_id=contractor_id)
 
         # Prefetch all pillar relations so each compliance evaluation avoids N+1.
-        workers_qs = workers_qs.prefetch_related(
+        workers_qs = workers_qs.select_related("safety_video").prefetch_related(
             "documents", "medical_records", "police_verifications", "trade_test_attempts"
         )
 
@@ -365,7 +366,9 @@ class WorkerListView(APIView):
             qs = Worker.objects.filter(contractor=request.user)
         else:
             qs = Worker.objects.all()
-        qs = qs.prefetch_related("documents", "trade_test_attempts")
+        qs = qs.select_related("safety_video").prefetch_related(
+            "documents", "trade_test_attempts"
+        )
         return Response(WorkerSerializer(qs, many=True).data)
 
     def post(self, request):
@@ -1192,6 +1195,48 @@ class TradeTestSubmitView(APIView):
                 "locked": worker.trade_test_status == Worker.TradeTestStatus.FAILED,
             },
             status=status.HTTP_201_CREATED,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Safety Training video — watch-progress heartbeat
+# ---------------------------------------------------------------------------
+class SafetyVideoHeartbeatView(APIView):
+    """
+    POST /api/safety-video/heartbeat/   (Field Officer)
+
+    Records how much of the mandatory safety induction video a worker has watched.
+    ``is_completed`` flips to True at 100%. Progress never moves backwards.
+
+    Body: {"worker": <id>, "progress_percentage": <0-100>}
+    """
+
+    def post(self, request):
+        denied = _require_role(request, User.Role.FIELD_OFFICER)
+        if denied:
+            return denied
+
+        worker = get_object_or_404(Worker, pk=request.data.get("worker"))
+        try:
+            pct = int(request.data.get("progress_percentage", 0))
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "progress_percentage must be an integer."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        pct = max(0, min(100, pct))
+
+        sv, _ = SafetyTrainingProgress.objects.get_or_create(worker=worker)
+        # Monotonic: never regress a previously higher watermark.
+        sv.progress_percentage = max(sv.progress_percentage, pct)
+        sv.is_completed = sv.progress_percentage >= 100
+        sv.save()
+        return Response(
+            {
+                "worker": worker.id,
+                "progress_percentage": sv.progress_percentage,
+                "is_completed": sv.is_completed,
+            }
         )
 
 
