@@ -18,6 +18,7 @@ urlpatterns = [
     ),
     # Workers
     path("workers/", views.WorkerListView.as_view(), name="workers"),
+    path("workers/<int:pk>/", views.WorkerDetailView.as_view(), name="worker-detail"),
     path("contractors/", views.contractors, name="contractors"),
     path(
         "verification-status/",

@@ -57,6 +57,8 @@ export const api = {
   workers: (token) => request('/workers/', { token }),
   createWorker: (token, body) =>
     request('/workers/', { method: 'POST', body, token }),
+  deleteWorker: (token, id) =>
+    request(`/workers/${id}/`, { method: 'DELETE', token }),
   contractors: (token) => request('/contractors/', { token }),
   verificationStatus: (token) => request('/verification-status/', { token }),
   bulkUpload: (token, formData) =>

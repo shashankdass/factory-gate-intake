@@ -32,6 +32,7 @@ export default function VerificationStatusTable() {
   const [error, setError] = useState(null)
   const [query, setQuery] = useState('')
   const [onlyIncomplete, setOnlyIncomplete] = useState(false)
+  const [deletingId, setDeletingId] = useState(null)
 
   const load = () => {
     if (!token) return
@@ -41,6 +42,26 @@ export default function VerificationStatusTable() {
       .then((r) => setRows(r))
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
+  }
+
+  async function remove(row) {
+    if (
+      !window.confirm(
+        `Delete ${row.name}? This permanently removes the worker and all their ` +
+          `records (documents, medical, police, trade test, safety video).`
+      )
+    )
+      return
+    setDeletingId(row.id)
+    setError(null)
+    try {
+      await api.deleteWorker(token, row.id)
+      setRows((rs) => rs.filter((r) => r.id !== row.id))
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setDeletingId(null)
+    }
   }
 
   useEffect(() => {
@@ -103,6 +124,7 @@ export default function VerificationStatusTable() {
                   <th key={c.key}>{c.label}</th>
                 ))}
                 <th>Overall</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
@@ -142,11 +164,21 @@ export default function VerificationStatusTable() {
                       <span className="badge amber">{row.remaining} remaining</span>
                     )}
                   </td>
+                  <td>
+                    <button
+                      className="btn small ghost vs-del"
+                      disabled={deletingId === row.id}
+                      onClick={() => remove(row)}
+                      title="Delete worker"
+                    >
+                      {deletingId === row.id ? '…' : '🗑'}
+                    </button>
+                  </td>
                 </tr>
               ))}
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={COLUMNS.length + 2} className="muted">
+                  <td colSpan={COLUMNS.length + 3} className="muted">
                     No workers match.
                   </td>
                 </tr>

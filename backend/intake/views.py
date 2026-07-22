@@ -420,6 +420,21 @@ class WorkerListView(APIView):
         )
 
 
+class WorkerDetailView(APIView):
+    """DELETE /api/workers/<id>/ — Field Officer removes a worker and all their
+    records (documents, medical, police, trade-test attempts, safety video, and
+    any deployment-list memberships all cascade)."""
+
+    def delete(self, request, pk):
+        denied = _require_role(request, User.Role.FIELD_OFFICER)
+        if denied:
+            return denied
+        worker = get_object_or_404(Worker, pk=pk)
+        name = worker.name
+        worker.delete()
+        return Response({"deleted": True, "name": name})
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def contractors(request):

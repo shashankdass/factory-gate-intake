@@ -1244,3 +1244,12 @@ textarea {
   font-size: 11px;
   padding: 3px 7px;
 }
+
+.vs-del {
+  color: var(--red);
+  border-color: transparent;
+  font-size: 15px;
+}
+.vs-del:hover {
+  background: #fef2f2;
+}
