@@ -434,6 +434,118 @@ def contractors(request):
     )
 
 
+class VerificationStatusView(APIView):
+    """
+    GET /api/verification-status/   (Field Officer)
+
+    A whole-registry verification matrix: one row per worker with the status of
+    every verification type and a link to each uploaded document, so the officer
+    can see at a glance what is verified vs remaining, and re-open any scan.
+    """
+
+    # status values are grouped into "done" vs "remaining" for the summary count.
+    _DONE = {"VERIFIED", "PASSED"}
+
+    def get(self, request):
+        denied = _require_role(request, User.Role.FIELD_OFFICER)
+        if denied:
+            return denied
+
+        today = timezone.now().date()
+        reqs = {r.name: r for r in RequirementMaster.objects.all()}
+
+        workers = (
+            Worker.objects.select_related("contractor", "safety_video")
+            .prefetch_related("documents", "medical_records", "police_verifications")
+            .order_by("name")
+        )
+
+        def doc_link(obj):
+            f = getattr(obj, "document_file", None)
+            if f:
+                try:
+                    return request.build_absolute_uri(f.url)
+                except ValueError:
+                    pass
+            return getattr(obj, "file_url", "") or None
+
+        rows = []
+        for w in workers:
+            # Most-recent document per requirement.
+            latest_doc = {}
+            for d in sorted(w.documents.all(), key=lambda x: x.uploaded_at):
+                latest_doc[d.requirement_id] = d
+
+            items = []
+
+            # --- Document requirements: Aadhaar, PAN, Safety Cert ---
+            for name, label in (("Aadhar", "Aadhaar"), ("PAN", "PAN"),
+                                 ("Safety Training", "Safety Cert")):
+                req = reqs.get(name)
+                d = latest_doc.get(req.id) if req else None
+                if d is None:
+                    items.append({"key": name, "label": label, "status": "MISSING", "doc_url": None})
+                    continue
+                st = d.verification_status.upper()  # VERIFIED / PENDING / REJECTED
+                if (st == "VERIFIED" and req.is_expirable and d.expiry_date
+                        and d.expiry_date < today):
+                    st = "EXPIRED"
+                items.append({"key": name, "label": label, "status": st, "doc_url": doc_link(d)})
+
+            # --- Medical ---
+            med = max(w.medical_records.all(), key=lambda m: m.exam_date, default=None)
+            if med is None:
+                m_st = "MISSING"
+            elif med.expiry_date and med.expiry_date < today:
+                m_st = "EXPIRED"
+            elif med.color_blindness or med.vertigo:
+                m_st = "FAILED"
+            else:
+                m_st = "VERIFIED"
+            items.append({"key": "MEDICAL", "label": "Medical", "status": m_st,
+                          "doc_url": doc_link(med) if med else None})
+
+            # --- Police verification ---
+            pol = max(w.police_verifications.all(), key=lambda p: p.issue_date, default=None)
+            if pol is None:
+                p_st = "MISSING"
+            elif pol.verification_status != WorkerDocument.Status.VERIFIED:
+                p_st = "PENDING"
+            elif pol.expiry_date and pol.expiry_date < today:
+                p_st = "EXPIRED"
+            else:
+                p_st = "VERIFIED"
+            items.append({"key": "POLICE", "label": "Police", "status": p_st,
+                          "doc_url": doc_link(pol) if pol else None})
+
+            # --- Trade test (no document) ---
+            items.append({"key": "TRADE_TEST", "label": "Trade Test",
+                          "status": w.trade_test_status, "doc_url": None})
+
+            # --- Safety video (no document) ---
+            try:
+                sv = w.safety_video
+            except SafetyTrainingProgress.DoesNotExist:
+                sv = None
+            items.append({"key": "SAFETY_VIDEO", "label": "Safety Video",
+                          "status": "VERIFIED" if (sv and sv.is_completed) else "INCOMPLETE",
+                          "doc_url": None})
+
+            remaining = sum(1 for it in items if it["status"] not in self._DONE)
+            rows.append({
+                "id": w.id,
+                "name": w.name,
+                "skill_type": w.skill_type,
+                "aadhar_number": w.aadhar_number,
+                "contractor_email": w.contractor.email if w.contractor else None,
+                "items": items,
+                "remaining": remaining,
+                "all_verified": remaining == 0,
+            })
+
+        return Response(rows)
+
+
 # ---------------------------------------------------------------------------
 # Documents — Contractor inline upload
 # ---------------------------------------------------------------------------

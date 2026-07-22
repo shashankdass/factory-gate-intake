@@ -1188,3 +1188,59 @@ textarea {
   margin-bottom: 12px;
   background: #eff6ff;
 }
+
+/* ---------------- Verification Status table ---------------- */
+.vs-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 8px 0 14px;
+}
+.vs-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+}
+.vs-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.vs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  background: var(--card);
+}
+.vs-table th,
+.vs-table td {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.vs-table thead th {
+  background: #f8fafc;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  color: var(--muted);
+  position: sticky;
+  top: 0;
+}
+.vs-worker {
+  min-width: 220px;
+  white-space: normal;
+}
+.vs-doc {
+  margin-left: 6px;
+  text-decoration: none;
+  font-size: 15px;
+}
+.vs-table .badge {
+  font-size: 11px;
+  padding: 3px 7px;
+}

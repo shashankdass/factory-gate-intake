@@ -20,6 +20,11 @@ urlpatterns = [
     path("workers/", views.WorkerListView.as_view(), name="workers"),
     path("contractors/", views.contractors, name="contractors"),
     path(
+        "verification-status/",
+        views.VerificationStatusView.as_view(),
+        name="verification-status",
+    ),
+    path(
         "workers/bulk-upload/",
         views.WorkerBulkUploadView.as_view(),
         name="worker-bulk-upload",

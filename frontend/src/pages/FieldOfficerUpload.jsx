@@ -2,9 +2,10 @@ import { useRef, useState } from 'react'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext.jsx'
 import FieldOfficerIntakeWorkbench from '../components/FieldOfficerIntakeWorkbench.jsx'
+import VerificationStatusTable from '../components/VerificationStatusTable.jsx'
 
-// Field Officer view: two tabs — bulk CSV import, and the intake verification
-// workbench. Keeps the existing /field-officer route + auth intact.
+// Field Officer view: intake workbench, verification-status board, and bulk CSV
+// import. Keeps the existing /field-officer route + auth intact.
 export default function FieldOfficerUpload() {
   const [tab, setTab] = useState('workbench')
   return (
@@ -18,13 +19,21 @@ export default function FieldOfficerUpload() {
           🧾 Intake Workbench
         </button>
         <button
+          className={`tab ${tab === 'status' ? 'active' : ''}`}
+          onClick={() => setTab('status')}
+        >
+          ✅ Verification Status
+        </button>
+        <button
           className={`tab ${tab === 'bulk' ? 'active' : ''}`}
           onClick={() => setTab('bulk')}
         >
           📤 Bulk CSV Import
         </button>
       </div>
-      {tab === 'workbench' ? <FieldOfficerIntakeWorkbench /> : <BulkUpload />}
+      {tab === 'workbench' && <FieldOfficerIntakeWorkbench />}
+      {tab === 'status' && <VerificationStatusTable />}
+      {tab === 'bulk' && <BulkUpload />}
     </div>
   )
 }

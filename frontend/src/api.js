@@ -58,6 +58,7 @@ export const api = {
   createWorker: (token, body) =>
     request('/workers/', { method: 'POST', body, token }),
   contractors: (token) => request('/contractors/', { token }),
+  verificationStatus: (token) => request('/verification-status/', { token }),
   bulkUpload: (token, formData) =>
     request('/workers/bulk-upload/', {
       method: 'POST',
