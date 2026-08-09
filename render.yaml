@@ -14,6 +14,10 @@
 # them once at blueprint import. That covers the object-storage credentials and
 # any resume-parser API key.
 
+# Kept as a fallback while the Supabase cutover is verified. Nothing references
+# it any more (DATABASE_URL is set manually), so it can be deleted once the app
+# is confirmed running on Supabase — note Render's free databases expire after
+# ~30 days regardless.
 databases:
   - name: gate-intake-db
     plan: free
@@ -33,10 +37,19 @@ services:
     # the app_encrypt/app_decrypt/app_blind_index helpers.
     startCommand: "python manage.py migrate --noinput && python manage.py seed_data && gunicorn core.wsgi:application --bind 0.0.0.0:$PORT"
     envVars:
+      # Set manually so the database can live outside Render. We use Supabase
+      # Postgres — same project as the storage bucket, and its free tier pauses
+      # after a week idle rather than being deleted after ~30 days like Render's.
+      #
+      # Use the **Session pooler** connection string:
+      #   postgresql://postgres.<ref>:<password>@aws-<region>.pooler.supabase.com:5432/postgres
+      #
+      # Not the direct `db.<ref>.supabase.co` host — that is IPv6-only and
+      # Render's egress is IPv4, which fails as an unexplained connection error.
+      # Not the transaction pooler on :6543 either — it disables prepared
+      # statements, which Django's persistent connections rely on.
       - key: DATABASE_URL
-        fromDatabase:
-          name: gate-intake-db
-          property: connectionString
+        sync: false
       - key: DJANGO_SECRET_KEY
         generateValue: true
       - key: DJANGO_DEBUG
@@ -60,7 +73,8 @@ services:
         generateValue: true
 
       # ---- Object storage (S3-compatible, PRIVATE bucket) ----
-      # Supabase Storage: https://<project-ref>.supabase.co/storage/v1/s3
+      # Supabase Storage: https://<project-ref>.storage.supabase.co/storage/v1/s3
+      # (the direct storage host — faster for large uploads than <ref>.supabase.co)
       # Create the bucket as private, then mint an S3 access key under
       # Project Settings → Storage → S3 access keys.
       - key: S3_ENDPOINT_URL
@@ -72,9 +86,10 @@ services:
       - key: S3_BUCKET
         value: "gate-intake-docs"
       - key: S3_REGION
-        # Supabase requires the project's real region and rejects "auto".
-        # Use "auto" only for Cloudflare R2.
-        value: "ap-south-1"
+        # Must be the bucket's real region — Supabase rejects "auto" (that is an
+        # R2-only value) and a mismatch fails as SignatureDoesNotMatch, which
+        # misleadingly reads like a bad access key.
+        value: "us-east-2"
       - key: S3_KEY_PREFIX
         value: "gate-intake"
       - key: PRESIGN_EXPIRY_SECONDS

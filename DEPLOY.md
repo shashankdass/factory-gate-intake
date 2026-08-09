@@ -54,7 +54,7 @@ the reference option (free tier, S3-compatible endpoint):
 3. **Project Settings → Storage → S3 access keys** → **New access key**. Copy the
    access key id and secret — the secret is shown once.
 4. Note your endpoint and region:
-   - `S3_ENDPOINT_URL` = `https://<project-ref>.supabase.co/storage/v1/s3`
+   - `S3_ENDPOINT_URL` = `https://<project-ref>.storage.supabase.co/storage/v1/s3`
    - `S3_REGION` = the project's real region, e.g. `ap-south-1`
      (Supabase rejects `auto`; only Cloudflare R2 accepts it)
 
