@@ -2,6 +2,16 @@ import { useState } from 'react'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext.jsx'
 
+// Headline shown for each denial reason. The gate re-checks compliance live, so
+// "approved but expired" is a real, distinct outcome the guard must be able to
+// read at a glance.
+const DENIAL_HEADLINE = {
+  DOCUMENT_EXPIRED: 'ACCESS DENIED — DOCUMENT EXPIRED',
+  COMPLIANCE_REGRESSED: 'ACCESS DENIED — NO LONGER COMPLIANT',
+  NOT_APPROVED: 'ACCESS DENIED — NOT ON AN APPROVED LIST',
+  UNKNOWN_WORKER: 'ACCESS DENIED — UNKNOWN WORKER',
+}
+
 // Gate Security: fast Aadhar lookup with a massive GREEN / RED verdict.
 export default function GateCheck() {
   const { token } = useAuth()
@@ -49,7 +59,9 @@ export default function GateCheck() {
       {result && (
         <div className={`verdict ${granted ? 'granted' : 'denied'}`}>
           <div className="verdict-main">
-            {granted ? 'ACCESS GRANTED' : 'ACCESS DENIED'}
+            {granted
+              ? 'ACCESS GRANTED'
+              : DENIAL_HEADLINE[result.reason_code] || 'ACCESS DENIED'}
           </div>
           <div className="verdict-sub">
             {granted ? 'ISSUE GATE PASS' : 'DO NOT ADMIT'}
@@ -65,6 +77,25 @@ export default function GateCheck() {
               </>
             ) : null}
             <div className="verdict-reason">{result.reason}</div>
+
+            {/* The live re-check is the point of this screen — show exactly what
+                lapsed, so the guard can tell the worker what to go and fix. */}
+            {result.compliance?.gaps?.length > 0 && (
+              <ul className="verdict-gaps">
+                {result.compliance.gaps.map((gap, i) => (
+                  <li key={i}>
+                    <strong>{gap.requirement_name}</strong>: {gap.reason}
+                    {gap.expiry_date ? ` (expired ${gap.expiry_date})` : ''}
+                    {gap.detail ? ` — ${gap.detail}` : ''}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {result.checked_at && (
+              <div className="verdict-stamp">
+                Checked live at {new Date(result.checked_at).toLocaleTimeString()}
+              </div>
+            )}
           </div>
         </div>
       )}

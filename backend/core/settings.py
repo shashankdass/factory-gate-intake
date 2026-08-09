@@ -172,3 +172,66 @@ MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# ---------------------------------------------------------------------------
+# S3-compatible private object storage (Supabase Storage / Cloudflare R2 / MinIO)
+#
+# Same mechanism as the resume-scanner service: one PRIVATE bucket, opaque keys,
+# and presigned GET URLs as the only read path. Every uploaded document —
+# Aadhaar, PAN, Safety cert, Medical, PVC, Resume — goes here.
+#
+#   Supabase Storage:  https://<project-ref>.supabase.co/storage/v1/s3
+#                      (S3_REGION must be the real project region, e.g.
+#                       ap-south-1 — Supabase rejects "auto")
+#   Cloudflare R2:     https://<account_id>.r2.cloudflarestorage.com
+#   MinIO (local):     http://127.0.0.1:9000
+#
+# When S3_ENDPOINT_URL is unset the storage layer falls back to a local signed
+# filesystem backend so `runserver` and the test suite work with zero config.
+# ---------------------------------------------------------------------------
+S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL", "").rstrip("/")
+S3_BUCKET = os.environ.get("S3_BUCKET", "gate-intake-docs")
+S3_ACCESS_KEY_ID = os.environ.get("S3_ACCESS_KEY_ID", "")
+S3_SECRET_ACCESS_KEY = os.environ.get("S3_SECRET_ACCESS_KEY", "")
+S3_REGION = os.environ.get("S3_REGION", "auto")
+S3_KEY_PREFIX = os.environ.get("S3_KEY_PREFIX", "gate-intake")
+# TTL for presigned download links. Clamped to the S3 signature limits.
+PRESIGN_EXPIRY_SECONDS = max(
+    60, min(3600, int(os.environ.get("PRESIGN_EXPIRY_SECONDS", "900")))
+)
+
+# ---------------------------------------------------------------------------
+# PII encryption (candidate name / phone / email)
+#
+# PII_ENCRYPTION_KEY  -> passphrase for pgcrypto's pgp_sym_encrypt (AES-256).
+# PII_BLIND_INDEX_KEY -> separate pepper for the deterministic HMAC blind index
+#                        that makes encrypted columns searchable for equality.
+#
+# The two keys MUST be different: the blind index is what makes duplicate
+# detection possible without decrypting, and reusing the cipher passphrase for
+# it would leak the passphrase into every index lookup.
+# ---------------------------------------------------------------------------
+PII_ENCRYPTION_KEY = os.environ.get(
+    "PII_ENCRYPTION_KEY", "dev-only-pii-encryption-key-change-me-32+chars"
+)
+PII_BLIND_INDEX_KEY = os.environ.get(
+    "PII_BLIND_INDEX_KEY", "dev-only-pii-blind-index-pepper-change-me"
+)
+
+# ---------------------------------------------------------------------------
+# Resume parsing provider
+#   claude  — Anthropic vision → strict JSON (best quality; needs ANTHROPIC_API_KEY)
+#   gemini  — Google Gemini vision (needs GEMINI_API_KEY)
+#   ocr     — reuse the OCR text pipeline + heuristics (no LLM key required)
+#   mock    — canned values, no network (always works; used by the test suite)
+# ---------------------------------------------------------------------------
+RESUME_PARSER_PROVIDER = os.environ.get("RESUME_PARSER_PROVIDER", "ocr").lower()
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-5")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+
+# Should a missing/unparsed resume block deployment?
+# Off by default so the seeded demo workers stay deployable; the resume pillar is
+# still reported in every compliance payload either way.
+REQUIRE_RESUME_FOR_COMPLIANCE = env_bool("REQUIRE_RESUME_FOR_COMPLIANCE", False)

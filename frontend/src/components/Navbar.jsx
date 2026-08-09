@@ -3,6 +3,10 @@ import { useAuth } from '../context/AuthContext.jsx'
 // Prominent global header with the role-switching toggle. Clicking a persona
 // logs in as that dummy account (cached after first use), swaps the active token
 // context and routes to the matching dashboard.
+//
+// Three personas since the refactor — Principal Employer, Contractor and Gate
+// Security. The list is driven entirely by PERSONAS, so removing the Field
+// Officer needed no change here.
 export default function Navbar() {
   const { personas, activeKey, activePersona, user, switchTo, error } = useAuth()
 

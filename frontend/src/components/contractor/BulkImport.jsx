@@ -1,45 +1,11 @@
 import { useRef, useState } from 'react'
-import { api } from '../api'
-import { useAuth } from '../context/AuthContext.jsx'
-import FieldOfficerIntakeWorkbench from '../components/FieldOfficerIntakeWorkbench.jsx'
-import VerificationStatusTable from '../components/VerificationStatusTable.jsx'
+import { api } from '../../api'
+import { useAuth } from '../../context/AuthContext.jsx'
 
-// Field Officer view: intake workbench, verification-status board, and bulk CSV
-// import. Keeps the existing /field-officer route + auth intact.
-export default function FieldOfficerUpload() {
-  const [tab, setTab] = useState('workbench')
-  return (
-    <div className="page">
-      <h1>Field Officer</h1>
-      <div className="tabs">
-        <button
-          className={`tab ${tab === 'workbench' ? 'active' : ''}`}
-          onClick={() => setTab('workbench')}
-        >
-          🧾 Intake Workbench
-        </button>
-        <button
-          className={`tab ${tab === 'status' ? 'active' : ''}`}
-          onClick={() => setTab('status')}
-        >
-          ✅ Verification Status
-        </button>
-        <button
-          className={`tab ${tab === 'bulk' ? 'active' : ''}`}
-          onClick={() => setTab('bulk')}
-        >
-          📤 Bulk CSV Import
-        </button>
-      </div>
-      {tab === 'workbench' && <FieldOfficerIntakeWorkbench />}
-      {tab === 'status' && <VerificationStatusTable />}
-      {tab === 'bulk' && <BulkUpload />}
-    </div>
-  )
-}
-
-// Field Officer: mass-import worker master profiles via CSV/Excel drag & drop.
-function BulkUpload() {
+// Mass-import worker master profiles via CSV/Excel drag & drop. Imported workers
+// are assigned to the calling contractor automatically — the pool is theirs, so
+// there is no contractor column to fill in (or to spoof).
+export default function BulkImport({ onImported }) {
   const { token } = useAuth()
   const inputRef = useRef(null)
   const [file, setFile] = useState(null)
@@ -64,6 +30,7 @@ function BulkUpload() {
       fd.append('file', file)
       const data = await api.bulkUpload(token, fd)
       setResult(data)
+      onImported?.()
     } catch (e) {
       setError(e.message)
     } finally {
@@ -74,9 +41,8 @@ function BulkUpload() {
   return (
     <div>
       <p className="muted">
-        Upload a CSV or .xlsx with columns:{' '}
-        <code>name, aadhar_number, skill_type</code> (optional{' '}
-        <code>contractor_email</code>). Duplicate Aadhar numbers are skipped.
+        Upload a CSV or .xlsx with columns: <code>name, aadhar_number, skill_type</code>.
+        Every imported worker joins your pool. Duplicate Aadhaar numbers are skipped.
       </p>
 
       <div
@@ -172,8 +138,8 @@ function Stat({ label, value, tone }) {
 
 function sampleCsvHref() {
   const csv =
-    'name,aadhar_number,skill_type,contractor_email\n' +
-    'Ramesh Gupta,200000000011,Mason,contractor.one@vendor.com\n' +
-    'Vijay Rao,200000000012,Plumber,contractor.one@vendor.com\n'
+    'name,aadhar_number,skill_type\n' +
+    'Ramesh Gupta,200000000011,Mason\n' +
+    'Vijay Rao,200000000012,Plumber\n'
   return 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv)
 }

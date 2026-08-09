@@ -12,6 +12,10 @@ const STATUS_TONE = {
 
 // Principal Employer: review submitted deployment lists, preview worker docs,
 // and Approve / Request Modifications / Reject with comments.
+//
+// Deliberately nothing else — project and requirement configuration were removed
+// from this dashboard, so the PE surface is exactly one job: review what the
+// contractor submitted and send a verdict back.
 export default function PeReview() {
   const { token } = useAuth()
   const [lists, setLists] = useState([])
@@ -150,7 +154,9 @@ function ReviewCard({ list, token, onDone }) {
 }
 
 function DocPreview({ doc }) {
-  const href = doc.file_url || doc.document_file
+  // Documents live in a private bucket; the API hands back a short-lived signed
+  // link, falling back to any legacy URL on pre-migration rows.
+  const href = doc.download_url || doc.file_url
   const tone =
     doc.verification_status === 'Verified'
       ? 'green'

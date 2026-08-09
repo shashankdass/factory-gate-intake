@@ -2,7 +2,7 @@
 Idempotent data-seed run on every deploy (see Procfile `release:` line).
 
 Creates:
-  * The 4 dummy persona accounts with exact credentials.
+  * The 3 dummy persona accounts with exact credentials.
   * Base requirements: Aadhar, PAN, Safety Training.
   * Two sample projects with mandatory requirements.
   * A handful of workers pre-assigned to the contractor, some fully compliant and
@@ -21,6 +21,8 @@ from django.utils import timezone
 from urllib.parse import quote
 
 from intake.models import (
+    CandidateProfile,
+    CandidateSkill,
     IntakeList,
     IntakeListWorker,
     IntakeMedicalRecord,
@@ -29,6 +31,7 @@ from intake.models import (
     ProjectRequirement,
     RequirementMaster,
     SafetyTrainingProgress,
+    Skill,
     TradeTestAttempt,
     TradeTestQuestion,
     User,
@@ -50,13 +53,6 @@ DUMMY_USERS = [
         "password": "contractor_test_123",
         "role": User.Role.CONTRACTOR,
         "first_name": "Contractor One",
-        "organization": "Vendor Co.",
-    },
-    {
-        "email": "field.officer@vendor.com",
-        "password": "field_test_123",
-        "role": User.Role.FIELD_OFFICER,
-        "first_name": "Field Officer",
         "organization": "Vendor Co.",
     },
     {
@@ -83,6 +79,7 @@ class Command(BaseCommand):
         self._seed_workers(contractor, requirements)
         self._seed_intake_pillars()
         self._seed_trade_test_questions()
+        self._seed_candidate_profiles(contractor)
 
         self.stdout.write(self.style.SUCCESS("✔ Seed complete."))
         self.stdout.write("  Dummy logins:")
@@ -344,6 +341,67 @@ class Command(BaseCommand):
                     worker=worker,
                     defaults={"progress_percentage": 100, "is_completed": True},
                 )
+
+    # -- Resume-derived candidate profiles ------------------------------------
+    def _seed_candidate_profiles(self, contractor) -> None:
+        """Seed a couple of parsed-resume profiles.
+
+        PII goes through ``set_pii``, so even the seed writes ciphertext — there
+        is no code path in this project that stores a candidate name, phone or
+        email in plaintext.
+        """
+        plan = {
+            "100000000001": {
+                "pii": {"name": "Ravi Kumar", "phone": "9876543210",
+                        "email": "ravi.kumar@example.com"},
+                "place": "Pune", "stream": "Civil", "category": "Technician",
+                "years": 8, "qualification": "ITI",
+                "skills": ["Carpenter", "Shuttering", "Formwork"],
+            },
+            "100000000002": {
+                "pii": {"name": "Suresh Yadav", "phone": "9876543211",
+                        "email": "suresh.yadav@example.com"},
+                "place": "Nashik", "stream": "Mechanical", "category": "Technician",
+                "years": 5, "qualification": "ITI",
+                "skills": ["Welder", "Fabrication", "Grinder"],
+            },
+            "100000000003": {
+                "pii": {"name": "Anil Sharma", "phone": "9876543212",
+                        "email": "anil.sharma@example.com"},
+                "place": "Pune", "stream": "Electrical", "category": "Technician",
+                "years": 11, "qualification": "Diploma",
+                "skills": ["Electrician", "Wiring", "Panel Wiring"],
+            },
+        }
+
+        seeded = 0
+        for aadhar_no, spec in plan.items():
+            worker = Worker.objects.filter(aadhar_number=aadhar_no).first()
+            if worker is None:
+                continue
+            profile, _ = CandidateProfile.objects.get_or_create(
+                worker=worker, defaults={"contractor": contractor}
+            )
+            profile.contractor = contractor
+            profile.set_pii(**spec["pii"])
+            profile.place = spec["place"]
+            profile.stream = spec["stream"]
+            profile.category = spec["category"]
+            profile.years_of_experience = spec["years"]
+            profile.qualification = spec["qualification"]
+            profile.parser_provider = "seed"
+            profile.save()
+            profile.sync_name_tokens(spec["pii"]["name"])
+
+            for raw in spec["skills"]:
+                skill = Skill.get_or_create_normalised(raw)
+                if skill is not None:
+                    CandidateSkill.objects.get_or_create(profile=profile, skill=skill)
+            seeded += 1
+
+        self.stdout.write(
+            f"  Candidate profiles: {seeded} seeded (PII encrypted at rest)"
+        )
 
     # -- Trade test question bank (image-aided practical MCQs) ---------------
     def _seed_trade_test_questions(self) -> None:

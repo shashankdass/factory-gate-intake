@@ -8,3 +8,13 @@ python-dotenv==1.0.1
 openpyxl==3.1.2
 whitenoise==6.6.0
 requests==2.32.3
+# S3-compatible private object storage (Supabase Storage / Cloudflare R2 / MinIO).
+boto3==1.35.36
+# AES-256-GCM for the SQLite/dev PII backend (production uses pgcrypto in-database).
+cryptography==43.0.1
+
+# --- Optional resume-parser providers -------------------------------------
+# Only needed when RESUME_PARSER_PROVIDER is set to that provider; both are
+# imported lazily, so the app runs without them on the default "ocr" provider.
+# anthropic==0.69.0
+# google-genai==1.3.0

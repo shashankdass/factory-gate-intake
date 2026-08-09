@@ -1,28 +1,45 @@
 """
 API views for the Gate-Intake platform.
 
+Operational ownership sits with the **Contractor**: they own their worker pool,
+run the split-pane intake workbench, administer trade tests, track safety-video
+progress, bulk-import workers, scan resumes and search their own labour pool by
+skill demand. The Principal Employer reviews submitted lists and nothing else.
+Gate Security scans an Aadhaar and gets a real-time GREEN/RED decision.
+
 Endpoints (all under /api/):
   POST   auth/login/                          -> token + persona
   GET    me/                                  -> current user
-  GET    projects/                            -> list projects (role scoped)
-  POST   projects/                            -> PE creates a project
-  GET    projects/<id>/                       -> project detail
+  GET    requirements/                        -> master requirement catalogue
+  GET    projects/                            -> list projects (role scoped, read-only)
   GET    projects/<id>/eligible-workers/      -> compliance split for a contractor
-  POST   workers/bulk-upload/                 -> Field Officer CSV/Excel import
-  POST   documents/upload/                    -> Contractor inline document upload
-  GET/POST intake-lists/                      -> list / create (submit) a list
+  POST   workforce-demand/                    -> "3 Carpenters, 4 Masons" pool search
+  GET    workers/  POST workers/              -> Contractor's own worker registry
+  DELETE workers/<id>/                        -> Contractor removes their worker
+  GET    verification-status/                 -> whole-pool verification matrix
+  POST   workers/bulk-upload/                 -> Contractor CSV/Excel import
+  POST   documents/upload/                    -> inline gap-fix upload
+  PATCH  documents/<id>/review/               -> PE verify/reject a document
+  GET/POST intake-lists/                      -> list / submit
   PATCH  intake-lists/<id>/review/            -> PE approve / request changes / reject
-  GET    gate-check/?aadhar=<n>               -> gate security lookup
+  GET    gate-check/?aadhar=<n>               -> REAL-TIME gate decision
+  POST   intake/onboard-worker/               -> unified 6-document single-pass intake
+  POST   intake/verify-document/              -> commit one verified document
+  POST   intake/ocr-extract/                  -> OCR a scan into form fields
+  POST   resume/parse/                        -> parse a resume without committing
+  GET    candidates/search/                   -> multi-attribute candidate filter
+  POST   storage/signed-url/                  -> batch of fresh expiring links
+  GET    trade-test/start/  POST submit-attempt/
+  POST   safety-video/heartbeat/
 """
 from __future__ import annotations
 
 import csv
 import io
-import os
-import re
 from datetime import timedelta
 
 from django.db import IntegrityError, transaction
+from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status
@@ -33,8 +50,12 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from . import ocr, resume as resume_parser, storage
+from . import crypto
 from .models import (
     INTAKE_EXPIRY_DAYS,
+    CandidateProfile,
+    CandidateSkill,
     IntakeList,
     IntakeListWorker,
     IntakeMedicalRecord,
@@ -42,6 +63,7 @@ from .models import (
     Project,
     RequirementMaster,
     SafetyTrainingProgress,
+    Skill,
     TradeTestAttempt,
     TradeTestQuestion,
     User,
@@ -50,6 +72,7 @@ from .models import (
     category_for_skill,
 )
 from .serializers import (
+    CandidateProfileSerializer,
     IntakeListSerializer,
     IntakeMedicalRecordSerializer,
     IntakePoliceVerificationSerializer,
@@ -67,7 +90,7 @@ TRADE_TEST_MAX_ATTEMPTS = 3
 
 
 # ---------------------------------------------------------------------------
-# Small role helpers
+# Small role / scope helpers
 # ---------------------------------------------------------------------------
 def _require_role(request, *roles) -> Response | None:
     """Return a 403 Response if the user's role is not in ``roles``; else None."""
@@ -82,14 +105,84 @@ def _require_role(request, *roles) -> Response | None:
     return None
 
 
+def _worker_scope(request):
+    """Workers this user may see.
+
+    A contractor sees only their own pool — that scoping is the whole point of
+    moving operations to them. PE and Gate see everything (read paths only).
+    """
+    if request.user.role == User.Role.CONTRACTOR:
+        return Worker.objects.filter(contractor=request.user)
+    return Worker.objects.all()
+
+
+def _prefetched(queryset):
+    """Prefetch every relation the compliance engine touches (kills the N+1)."""
+    return queryset.select_related("safety_video", "candidate_profile").prefetch_related(
+        "documents__requirement",
+        "medical_records",
+        "police_verifications",
+        "trade_test_attempts",
+        "candidate_profile__candidate_skills__skill",
+    )
+
+
+def _owned_worker(request, pk) -> Worker:
+    """Fetch a worker the caller is allowed to act on, else 404."""
+    return get_object_or_404(_worker_scope(request), pk=pk)
+
+
+def _serializer_context(request, *, sign=False):
+    """PII is revealed to the owning contractor and to the reviewing PE only."""
+    return {
+        "request": request,
+        "sign": sign,
+        "reveal_pii": request.user.role in (
+            User.Role.CONTRACTOR,
+            User.Role.PRINCIPAL_EMPLOYER,
+        ),
+    }
+
+
+def _store_upload(upload, prefix: str) -> str | None:
+    """Push one uploaded file to the private bucket, return its object key."""
+    if upload is None:
+        return None
+    data = upload.read()
+    if not data:
+        return None
+    return storage.upload(data, upload.content_type, prefix, upload.name)
+
+
+def _iso(d):
+    return d.isoformat() if d else None
+
+
+def _parse_iso_date(value):
+    """Lenient ISO date parse — returns a ``date`` or None."""
+    if not value:
+        return None
+    try:
+        return timezone.datetime.fromisoformat(str(value)).date()
+    except ValueError:
+        return None
+
+
+def _as_bool(value):
+    """Multipart sends booleans as strings ("true"/"false"); coerce safely."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
 class LoginView(APIView):
     """Email/password login returning a DRF token and the persona payload.
 
-    The frontend role-switcher simply calls this with each hardcoded credential
-    to obtain that persona's token, then masquerades by swapping the active token.
+    The frontend role-switcher calls this with each hardcoded credential to
+    obtain that persona's token, then masquerades by swapping the active token.
     """
 
     permission_classes = [AllowAny]
@@ -106,12 +199,7 @@ class LoginView(APIView):
             )
 
         token, _ = Token.objects.get_or_create(user=user)
-        return Response(
-            {
-                "token": token.key,
-                "user": UserSerializer(user).data,
-            }
-        )
+        return Response({"token": token.key, "user": UserSerializer(user).data})
 
 
 @api_view(["GET"])
@@ -128,17 +216,21 @@ def me(request):
 def requirements(request):
     """GET /api/requirements/ — the full master requirement catalogue.
 
-    Used by the contractor's checkbox filter to search workers by which
-    requirements they have fulfilled, independent of any project's mandatory set.
+    Powers the contractor's checkbox filter (search workers by which
+    requirements they have fulfilled, independent of any project's mandatory set).
     """
     qs = RequirementMaster.objects.all()
     return Response(RequirementMasterSerializer(qs, many=True).data)
 
 
 # ---------------------------------------------------------------------------
-# Projects
+# Projects — read-only
+#
+# Project and requirement configuration was removed from the product: the PE
+# dashboard is strictly a review surface now, so there is no create/update path
+# here. Projects arrive via the seed (or an admin) and are consumed read-only.
 # ---------------------------------------------------------------------------
-class ProjectListCreateView(APIView):
+class ProjectListView(APIView):
     def get(self, request):
         user = request.user
         if user.role == User.Role.PRINCIPAL_EMPLOYER:
@@ -149,17 +241,6 @@ class ProjectListCreateView(APIView):
             qs = Project.objects.all()
         qs = qs.prefetch_related("project_requirements__requirement", "contractors")
         return Response(ProjectSerializer(qs, many=True).data)
-
-    def post(self, request):
-        denied = _require_role(request, User.Role.PRINCIPAL_EMPLOYER)
-        if denied:
-            return denied
-        serializer = ProjectSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        project = serializer.save(principal_employer=request.user)
-        return Response(
-            ProjectSerializer(project).data, status=status.HTTP_201_CREATED
-        )
 
 
 @api_view(["GET"])
@@ -176,7 +257,7 @@ class EligibleWorkersView(APIView):
     GET /api/projects/<id>/eligible-workers/
 
     Evaluates the project's mandatory requirements against the calling
-    contractor's assigned workers and returns a structured split:
+    contractor's own workers and returns a structured split:
 
       {
         "project": {...},
@@ -193,19 +274,12 @@ class EligibleWorkersView(APIView):
             pk=pk,
         )
 
-        # Contractors only see their own workers. PE/Field officer can inspect all.
-        if request.user.role == User.Role.CONTRACTOR:
-            workers_qs = Worker.objects.filter(contractor=request.user)
-        else:
+        workers_qs = _worker_scope(request)
+        if request.user.role != User.Role.CONTRACTOR:
             contractor_id = request.query_params.get("contractor_id")
-            workers_qs = Worker.objects.all()
             if contractor_id:
                 workers_qs = workers_qs.filter(contractor_id=contractor_id)
-
-        # Prefetch all pillar relations so each compliance evaluation avoids N+1.
-        workers_qs = workers_qs.select_related("safety_video").prefetch_related(
-            "documents", "medical_records", "police_verifications", "trade_test_attempts"
-        )
+        workers_qs = _prefetched(workers_qs)
 
         required = [
             {
@@ -216,11 +290,12 @@ class EligibleWorkersView(APIView):
             for pr in project.project_requirements.filter(is_mandatory=True)
         ]
 
+        context = _serializer_context(request)
         ready, needs_fixes = [], []
         for worker in workers_qs:
             compliance = worker.compliance_against_project(project)
             payload = {
-                "worker": WorkerSerializer(worker).data,
+                "worker": WorkerSerializer(worker, context=context).data,
                 "compliance": compliance,
             }
             (ready if compliance["is_compliant"] else needs_fixes).append(payload)
@@ -241,14 +316,136 @@ class EligibleWorkersView(APIView):
 
 
 # ---------------------------------------------------------------------------
-# Workers — Field Officer bulk upload
+# Workforce demand — "3 Carpenters, 4 Masons" against the contractor's own pool
+# ---------------------------------------------------------------------------
+class WorkforceDemandView(APIView):
+    """
+    POST /api/workforce-demand/   (Contractor)
+
+    Body::
+
+        {"demands": [{"skill": "Carpenter", "count": 3},
+                     {"skill": "Mason", "count": 4}],
+         "project": 12}          # optional — scopes document requirements
+
+    The contractor types their immediate needs; this instantly queries their own
+    labour pool and answers, per line: who is deployable right now, who could be
+    with fixes, and how many bodies short they are.
+
+    Matching is deliberately broad — the worker's ``skill_type`` OR any skill
+    parsed from their resume — because "Carpenter" on a CV and "carpentry" in
+    the registry are the same person.
+    """
+
+    def post(self, request):
+        denied = _require_role(request, User.Role.CONTRACTOR)
+        if denied:
+            return denied
+
+        raw_demands = request.data.get("demands") or []
+        if not isinstance(raw_demands, list) or not raw_demands:
+            return Response(
+                {"detail": "demands must be a non-empty list of {skill, count}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        project = None
+        project_id = request.data.get("project")
+        if project_id:
+            project = get_object_or_404(
+                Project.objects.prefetch_related("project_requirements__requirement"),
+                pk=project_id,
+            )
+
+        workers = list(_prefetched(_worker_scope(request)))
+
+        # Evaluate each worker once — several demand lines usually overlap.
+        evaluated = {w.id: w.compliance_snapshot(project) for w in workers}
+        context = _serializer_context(request)
+
+        def matches(worker, skill: str) -> bool:
+            needle = skill.strip().lower()
+            if not needle:
+                return False
+            if needle in (worker.skill_type or "").lower():
+                return True
+            try:
+                profile = worker.candidate_profile
+            except CandidateProfile.DoesNotExist:
+                return False
+            return any(
+                needle in cs.skill.name for cs in profile.candidate_skills.all()
+            )
+
+        lines, total_required, total_ready = [], 0, 0
+        for raw in raw_demands:
+            skill = str((raw or {}).get("skill") or "").strip()
+            try:
+                count = max(0, int((raw or {}).get("count") or 0))
+            except (TypeError, ValueError):
+                count = 0
+            if not skill:
+                continue
+
+            matched = [w for w in workers if matches(w, skill)]
+            ready = [w for w in matched if evaluated[w.id]["is_compliant"]]
+            fixable = [w for w in matched if not evaluated[w.id]["is_compliant"]]
+
+            total_required += count
+            total_ready += min(count, len(ready))
+
+            lines.append(
+                {
+                    "skill": skill,
+                    "required": count,
+                    "available": len(ready),
+                    "shortfall": max(0, count - len(ready)),
+                    # A shortfall the contractor can close today by fixing papers
+                    # rather than by hiring — the actionable number.
+                    "fixable": len(fixable),
+                    "ready_workers": [
+                        {
+                            "worker": WorkerSerializer(w, context=context).data,
+                            "compliance": evaluated[w.id],
+                        }
+                        for w in ready[: max(count, 10)]
+                    ],
+                    "needs_fixes": [
+                        {
+                            "worker": WorkerSerializer(w, context=context).data,
+                            "compliance": evaluated[w.id],
+                        }
+                        for w in fixable[:10]
+                    ],
+                }
+            )
+
+        return Response(
+            {
+                "project": ProjectSerializer(project).data if project else None,
+                "summary": {
+                    "total_required": total_required,
+                    "total_ready": total_ready,
+                    "total_shortfall": max(0, total_required - total_ready),
+                    "pool_size": len(workers),
+                },
+                "lines": lines,
+            }
+        )
+
+
+# ---------------------------------------------------------------------------
+# Workers — bulk import
 # ---------------------------------------------------------------------------
 class WorkerBulkUploadView(APIView):
     """
-    POST /api/workers/bulk-upload/   (Field Officer only)
+    POST /api/workers/bulk-upload/   (Contractor)
 
-    Accepts a CSV (or Excel .xlsx) file under the form field ``file`` with columns:
-        name, aadhar_number, skill_type   (optional: contractor_email)
+    Accepts a CSV (or Excel .xlsx) file under the form field ``file`` with
+    columns: name, aadhar_number, skill_type.
+
+    Imported workers are always assigned to the calling contractor — the pool is
+    theirs, so there is no contractor column to spoof.
 
     Idempotent-ish: existing Aadhar numbers are reported as skipped, never
     duplicated, honouring the UNIQUE constraint.
@@ -257,7 +454,7 @@ class WorkerBulkUploadView(APIView):
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
-        denied = _require_role(request, User.Role.FIELD_OFFICER)
+        denied = _require_role(request, User.Role.CONTRACTOR)
         if denied:
             return denied
 
@@ -274,13 +471,11 @@ class WorkerBulkUploadView(APIView):
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         created, skipped, errors = [], [], []
-        contractor_cache: dict[str, User | None] = {}
 
         for idx, row in enumerate(rows, start=2):  # row 1 is the header
             name = (row.get("name") or "").strip()
-            aadhar = (row.get("aadhar_number") or "").strip()
+            aadhar = str(row.get("aadhar_number") or "").strip()
             skill = (row.get("skill_type") or "").strip()
-            contractor_email = (row.get("contractor_email") or "").strip().lower()
 
             if not (name and aadhar and skill):
                 errors.append({"row": idx, "error": "Missing name/aadhar/skill."})
@@ -289,21 +484,13 @@ class WorkerBulkUploadView(APIView):
                 errors.append({"row": idx, "error": f"Invalid Aadhar '{aadhar}'."})
                 continue
 
-            contractor = None
-            if contractor_email:
-                if contractor_email not in contractor_cache:
-                    contractor_cache[contractor_email] = User.objects.filter(
-                        email=contractor_email, role=User.Role.CONTRACTOR
-                    ).first()
-                contractor = contractor_cache[contractor_email]
-
             try:
                 with transaction.atomic():
                     worker = Worker.objects.create(
                         name=name,
                         aadhar_number=aadhar,
                         skill_type=skill,
-                        contractor=contractor,
+                        contractor=request.user,
                     )
                 created.append({"row": idx, "id": worker.id, "aadhar": aadhar})
             except IntegrityError:
@@ -358,28 +545,23 @@ class WorkerBulkUploadView(APIView):
 class WorkerListView(APIView):
     """
     GET  /api/workers/  — role-scoped worker registry (used by dashboards).
-    POST /api/workers/  — Field Officer creates a single worker from scratch.
+    POST /api/workers/  — Contractor creates a single worker from scratch.
     """
 
     def get(self, request):
-        if request.user.role == User.Role.CONTRACTOR:
-            qs = Worker.objects.filter(contractor=request.user)
-        else:
-            qs = Worker.objects.all()
-        qs = qs.select_related("safety_video").prefetch_related(
-            "documents", "trade_test_attempts"
+        qs = _prefetched(_worker_scope(request))
+        return Response(
+            WorkerSerializer(qs, many=True, context=_serializer_context(request)).data
         )
-        return Response(WorkerSerializer(qs, many=True).data)
 
     def post(self, request):
-        denied = _require_role(request, User.Role.FIELD_OFFICER)
+        denied = _require_role(request, User.Role.CONTRACTOR)
         if denied:
             return denied
 
         name = (request.data.get("name") or "").strip()
         aadhar = (request.data.get("aadhar_number") or "").strip()
         skill = (request.data.get("skill_type") or "").strip()
-        contractor_id = request.data.get("contractor")
 
         if not (name and aadhar and skill):
             return Response(
@@ -392,23 +574,12 @@ class WorkerListView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        contractor = None
-        if contractor_id:
-            contractor = User.objects.filter(
-                id=contractor_id, role=User.Role.CONTRACTOR
-            ).first()
-            if contractor is None:
-                return Response(
-                    {"detail": "Assigned contractor not found."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
         try:
             worker = Worker.objects.create(
                 name=name,
                 aadhar_number=aadhar,
                 skill_type=skill,
-                contractor=contractor,
+                contractor=request.user,
             )
         except IntegrityError:
             return Response(
@@ -416,70 +587,70 @@ class WorkerListView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return Response(
-            WorkerSerializer(worker).data, status=status.HTTP_201_CREATED
+            WorkerSerializer(worker, context=_serializer_context(request)).data,
+            status=status.HTTP_201_CREATED,
         )
 
 
 class WorkerDetailView(APIView):
-    """DELETE /api/workers/<id>/ — Field Officer removes a worker and all their
-    records (documents, medical, police, trade-test attempts, safety video, and
-    any deployment-list memberships all cascade)."""
+    """DELETE /api/workers/<id>/ — Contractor removes one of their own workers
+    and all their records (documents, medical, police, trade-test attempts,
+    safety video, candidate profile and deployment-list memberships cascade)."""
 
     def delete(self, request, pk):
-        denied = _require_role(request, User.Role.FIELD_OFFICER)
+        denied = _require_role(request, User.Role.CONTRACTOR)
         if denied:
             return denied
-        worker = get_object_or_404(Worker, pk=pk)
+        worker = _owned_worker(request, pk)
+
+        # Clean the private bucket up as well, so deleting a worker really does
+        # remove their documents rather than orphaning them.
+        keys = [d.storage_key for d in worker.documents.all() if d.storage_key]
+        keys += [m.storage_key for m in worker.medical_records.all() if m.storage_key]
+        keys += [p.storage_key for p in worker.police_verifications.all() if p.storage_key]
+        try:
+            keys.append(worker.candidate_profile.resume_key)
+        except CandidateProfile.DoesNotExist:
+            pass
+
         name = worker.name
         worker.delete()
+        for key in keys:
+            storage.delete(key)
         return Response({"deleted": True, "name": name})
-
-
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
-def contractors(request):
-    """GET /api/contractors/ — list contractors, for the Field Officer's
-    'assign worker to contractor' picker."""
-    qs = User.objects.filter(role=User.Role.CONTRACTOR).order_by("email")
-    return Response(
-        [
-            {"id": u.id, "email": u.email, "organization": u.organization}
-            for u in qs
-        ]
-    )
 
 
 class VerificationStatusView(APIView):
     """
-    GET /api/verification-status/   (Field Officer)
+    GET /api/verification-status/   (Contractor)
 
-    A whole-registry verification matrix: one row per worker with the status of
-    every verification type and a link to each uploaded document, so the officer
-    can see at a glance what is verified vs remaining, and re-open any scan.
+    A whole-pool verification matrix: one row per worker with the status of
+    every verification type and a fresh expiring link to each stored document,
+    so the contractor sees at a glance what is verified vs remaining and can
+    re-open or download any scan.
     """
 
-    # status values are grouped into "done" vs "remaining" for the summary count.
+    # status values grouped into "done" vs "remaining" for the summary count.
     _DONE = {"VERIFIED", "PASSED"}
 
     def get(self, request):
-        denied = _require_role(request, User.Role.FIELD_OFFICER)
+        denied = _require_role(request, User.Role.CONTRACTOR)
         if denied:
             return denied
 
         today = timezone.now().date()
         reqs = {r.name: r for r in RequirementMaster.objects.all()}
+        workers = _prefetched(_worker_scope(request)).order_by("name")
 
-        workers = (
-            Worker.objects.select_related("contractor", "safety_video")
-            .prefetch_related("documents", "medical_records", "police_verifications")
-            .order_by("name")
-        )
-
-        def doc_link(obj):
-            f = getattr(obj, "document_file", None)
-            if f:
+        def link(obj):
+            if obj is None:
+                return None
+            if getattr(obj, "storage_key", ""):
+                return storage.signed_url(obj.storage_key)
+            legacy = getattr(obj, "document_file", None)
+            if legacy:
                 try:
-                    return request.build_absolute_uri(f.url)
+                    return request.build_absolute_uri(legacy.url)
                 except ValueError:
                     pass
             return getattr(obj, "file_url", "") or None
@@ -495,17 +666,19 @@ class VerificationStatusView(APIView):
 
             # --- Document requirements: Aadhaar, PAN, Safety Cert ---
             for name, label in (("Aadhar", "Aadhaar"), ("PAN", "PAN"),
-                                 ("Safety Training", "Safety Cert")):
+                                ("Safety Training", "Safety Cert")):
                 req = reqs.get(name)
                 d = latest_doc.get(req.id) if req else None
                 if d is None:
-                    items.append({"key": name, "label": label, "status": "MISSING", "doc_url": None})
+                    items.append({"key": name, "label": label,
+                                  "status": "MISSING", "doc_url": None})
                     continue
                 st = d.verification_status.upper()  # VERIFIED / PENDING / REJECTED
                 if (st == "VERIFIED" and req.is_expirable and d.expiry_date
                         and d.expiry_date < today):
                     st = "EXPIRED"
-                items.append({"key": name, "label": label, "status": st, "doc_url": doc_link(d)})
+                items.append({"key": name, "label": label, "status": st,
+                              "doc_url": link(d)})
 
             # --- Medical ---
             med = max(w.medical_records.all(), key=lambda m: m.exam_date, default=None)
@@ -518,7 +691,7 @@ class VerificationStatusView(APIView):
             else:
                 m_st = "VERIFIED"
             items.append({"key": "MEDICAL", "label": "Medical", "status": m_st,
-                          "doc_url": doc_link(med) if med else None})
+                          "doc_url": link(med)})
 
             # --- Police verification ---
             pol = max(w.police_verifications.all(), key=lambda p: p.issue_date, default=None)
@@ -531,7 +704,7 @@ class VerificationStatusView(APIView):
             else:
                 p_st = "VERIFIED"
             items.append({"key": "POLICE", "label": "Police", "status": p_st,
-                          "doc_url": doc_link(pol) if pol else None})
+                          "doc_url": link(pol)})
 
             # --- Trade test (no document) ---
             items.append({"key": "TRADE_TEST", "label": "Trade Test",
@@ -546,13 +719,24 @@ class VerificationStatusView(APIView):
                           "status": "VERIFIED" if (sv and sv.is_completed) else "INCOMPLETE",
                           "doc_url": None})
 
+            # --- Resume ---
+            try:
+                profile = w.candidate_profile
+            except CandidateProfile.DoesNotExist:
+                profile = None
+            items.append({
+                "key": "RESUME",
+                "label": "Resume",
+                "status": "VERIFIED" if (profile and profile.resume_key) else "MISSING",
+                "doc_url": storage.signed_url(profile.resume_key) if profile else None,
+            })
+
             remaining = sum(1 for it in items if it["status"] not in self._DONE)
             rows.append({
                 "id": w.id,
                 "name": w.name,
                 "skill_type": w.skill_type,
                 "aadhar_number": w.aadhar_number,
-                "contractor_email": w.contractor.email if w.contractor else None,
                 "items": items,
                 "remaining": remaining,
                 "all_verified": remaining == 0,
@@ -562,16 +746,17 @@ class VerificationStatusView(APIView):
 
 
 # ---------------------------------------------------------------------------
-# Documents — Contractor inline upload
+# Documents — inline gap-fix upload
 # ---------------------------------------------------------------------------
 class DocumentUploadView(APIView):
     """
     POST /api/documents/upload/   (Contractor)
 
-    Creates or updates the document for a (worker, requirement) slot. Uploading a
-    fresh document resets its status to 'Pending' and clears any prior rejection.
+    Creates or updates the document for a (worker, requirement) slot and pushes
+    the file to the private bucket. Uploading a fresh document resets its status
+    to 'Pending' and clears any prior rejection.
 
-    Form fields: worker, requirement, document_number, expiry_date, file / file_url
+    Form fields: worker, requirement, document_number, expiry_date, file
     """
 
     parser_classes = [MultiPartParser, FormParser, JSONParser]
@@ -589,13 +774,7 @@ class DocumentUploadView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        worker = get_object_or_404(Worker, pk=worker_id)
-        # Contractors may only touch their own workers.
-        if worker.contractor_id != request.user.id:
-            return Response(
-                {"detail": "You may only upload documents for your own workers."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+        worker = _owned_worker(request, worker_id)
         requirement = get_object_or_404(RequirementMaster, pk=requirement_id)
 
         # One document slot per (worker, requirement): update in place if present.
@@ -606,8 +785,11 @@ class DocumentUploadView(APIView):
         doc.expiry_date = request.data.get("expiry_date") or doc.expiry_date
 
         if "file" in request.FILES:
-            doc.document_file = request.FILES["file"]
-            doc.file_url = ""  # served via document_file.url henceforth
+            old_key = doc.storage_key
+            doc.storage_key = _store_upload(request.FILES["file"], "worker_docs") or ""
+            doc.file_url = ""
+            if old_key and old_key != doc.storage_key:
+                storage.delete(old_key)
         elif request.data.get("file_url"):
             doc.file_url = request.data["file_url"]
 
@@ -617,22 +799,22 @@ class DocumentUploadView(APIView):
         doc.save()
 
         return Response(
-            WorkerDocumentSerializer(doc).data, status=status.HTTP_200_OK
+            WorkerDocumentSerializer(
+                doc, context=_serializer_context(request, sign=True)
+            ).data,
+            status=status.HTTP_200_OK,
         )
 
 
 class DocumentReviewView(APIView):
     """
-    PATCH /api/documents/<id>/review/   (PE / Field Officer verifier)
+    PATCH /api/documents/<id>/review/   (PE)
 
     Body: {"verification_status": "Verified"|"Rejected", "rejection_reason": "..."}
-    Provided so the compliance engine has verified documents to work with.
     """
 
     def patch(self, request, pk):
-        denied = _require_role(
-            request, User.Role.PRINCIPAL_EMPLOYER, User.Role.FIELD_OFFICER
-        )
+        denied = _require_role(request, User.Role.PRINCIPAL_EMPLOYER)
         if denied:
             return denied
         doc = get_object_or_404(WorkerDocument, pk=pk)
@@ -649,7 +831,9 @@ class DocumentReviewView(APIView):
             else ""
         )
         doc.save()
-        return Response(WorkerDocumentSerializer(doc).data)
+        return Response(
+            WorkerDocumentSerializer(doc, context=_serializer_context(request)).data
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -675,9 +859,14 @@ class IntakeListView(APIView):
         else:
             qs = IntakeList.objects.all()
         qs = qs.select_related("project", "contractor").prefetch_related(
-            "list_workers__worker__documents"
+            "list_workers__worker__documents__requirement",
+            "list_workers__worker__candidate_profile__candidate_skills__skill",
         )
-        return Response(IntakeListSerializer(qs, many=True).data)
+        return Response(
+            IntakeListSerializer(
+                qs, many=True, context=_serializer_context(request, sign=True)
+            ).data
+        )
 
     def post(self, request):
         denied = _require_role(request, User.Role.CONTRACTOR)
@@ -695,9 +884,7 @@ class IntakeListView(APIView):
             )
 
         workers = list(
-            Worker.objects.filter(
-                id__in=worker_ids, contractor=request.user
-            ).prefetch_related("documents")
+            _prefetched(Worker.objects.filter(id__in=worker_ids, contractor=request.user))
         )
         if len(workers) != len(set(worker_ids)):
             return Response(
@@ -725,20 +912,16 @@ class IntakeListView(APIView):
             intake_list = IntakeList.objects.create(
                 project=project,
                 contractor=request.user,
-                status=IntakeList.Status.SUBMITTED
-                if submit
-                else IntakeList.Status.DRAFT,
+                status=IntakeList.Status.SUBMITTED if submit else IntakeList.Status.DRAFT,
                 submitted_at=timezone.now() if submit else None,
             )
             IntakeListWorker.objects.bulk_create(
-                [
-                    IntakeListWorker(intake_list=intake_list, worker=w)
-                    for w in workers
-                ]
+                [IntakeListWorker(intake_list=intake_list, worker=w) for w in workers]
             )
 
         return Response(
-            IntakeListSerializer(intake_list).data, status=status.HTTP_201_CREATED
+            IntakeListSerializer(intake_list, context=_serializer_context(request)).data,
+            status=status.HTTP_201_CREATED,
         )
 
 
@@ -762,11 +945,15 @@ class IntakeListDetailView(APIView):
     def get(self, request, pk):
         intake_list = get_object_or_404(
             IntakeList.objects.select_related("project", "contractor").prefetch_related(
-                "list_workers__worker__documents"
+                "list_workers__worker__documents__requirement"
             ),
             pk=pk,
         )
-        return Response(IntakeListSerializer(intake_list).data)
+        return Response(
+            IntakeListSerializer(
+                intake_list, context=_serializer_context(request, sign=True)
+            ).data
+        )
 
     def patch(self, request, pk):
         denied = _require_role(request, User.Role.CONTRACTOR)
@@ -802,9 +989,9 @@ class IntakeListDetailView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             workers = list(
-                Worker.objects.filter(
-                    id__in=worker_ids, contractor=request.user
-                ).prefetch_related("documents")
+                _prefetched(
+                    Worker.objects.filter(id__in=worker_ids, contractor=request.user)
+                )
             )
             if len(workers) != len(set(worker_ids)):
                 return Response(
@@ -834,10 +1021,7 @@ class IntakeListDetailView(APIView):
             if "worker_ids" in request.data:
                 intake_list.list_workers.all().delete()
                 IntakeListWorker.objects.bulk_create(
-                    [
-                        IntakeListWorker(intake_list=intake_list, worker=w)
-                        for w in workers
-                    ]
+                    [IntakeListWorker(intake_list=intake_list, worker=w) for w in workers]
                 )
             if resubmit:
                 intake_list.status = IntakeList.Status.SUBMITTED
@@ -847,7 +1031,9 @@ class IntakeListDetailView(APIView):
                 intake_list.reviewed_at = None
             intake_list.save()
 
-        return Response(IntakeListSerializer(intake_list).data)
+        return Response(
+            IntakeListSerializer(intake_list, context=_serializer_context(request)).data
+        )
 
 
 class IntakeListReviewView(APIView):
@@ -888,18 +1074,23 @@ class IntakeListReviewView(APIView):
         intake_list.pe_comments = request.data.get("comments", "")
         intake_list.reviewed_at = timezone.now()
         intake_list.save()
-        return Response(IntakeListSerializer(intake_list).data)
+        return Response(
+            IntakeListSerializer(intake_list, context=_serializer_context(request)).data
+        )
 
 
 # ---------------------------------------------------------------------------
-# Gate security quick lookup
+# Gate security — REAL-TIME compliance, not an approval snapshot
 # ---------------------------------------------------------------------------
 class GateCheckView(APIView):
     """
     GET /api/gate-check/?aadhar=<number>   (Gate Security)
 
-    Returns a simple GREEN/RED decision based on whether the worker sits on any
-    PE-approved intake list.
+    Approval alone is no longer enough. The gate re-evaluates the worker's full
+    compliance against the approved list's project **at scan time**, so a medical
+    or PVC that lapsed after the PE signed off — or any regressed pillar — flips
+    the decision to RED with the reason, instead of waving through a worker whose
+    papers died last week.
     """
 
     def get(self, request):
@@ -911,69 +1102,48 @@ class GateCheckView(APIView):
             )
 
         worker = (
-            Worker.objects.filter(aadhar_number=aadhar)
-            .prefetch_related("documents")
-            .first()
+            _prefetched(Worker.objects.filter(aadhar_number=aadhar)).first()
         )
         if worker is None:
             return Response(
                 {
                     "access": "DENIED",
+                    "reason_code": "UNKNOWN_WORKER",
                     "reason": "No worker found for this Aadhar number.",
                     "worker": None,
+                    "checked_at": timezone.now().isoformat(),
                 }
             )
 
-        approved_list = worker.is_gate_cleared()
-        if approved_list is not None:
-            return Response(
-                {
-                    "access": "GRANTED",
-                    "reason": "Worker is on an approved deployment list.",
-                    "worker": {
-                        "id": worker.id,
-                        "name": worker.name,
-                        "skill_type": worker.skill_type,
-                        "aadhar_number": worker.aadhar_number,
-                    },
-                    "project": approved_list.project.name,
-                    "list_id": approved_list.id,
-                }
-            )
-
+        decision = worker.gate_decision()
         return Response(
             {
-                "access": "DENIED",
-                "reason": "Worker is not on any approved deployment list.",
+                **decision,
                 "worker": {
                     "id": worker.id,
                     "name": worker.name,
                     "skill_type": worker.skill_type,
                     "aadhar_number": worker.aadhar_number,
                 },
+                "checked_at": timezone.now().isoformat(),
             }
         )
 
 
 # ---------------------------------------------------------------------------
-# Field Officer Intake Workbench — mock OCR, strict verification, video heartbeat
+# Contractor Intake Workbench — mock OCR, strict verification, video heartbeat
 # ---------------------------------------------------------------------------
-def _iso(d):
-    return d.isoformat() if d else None
-
-
 class MockOcrView(APIView):
     """
-    GET /api/intake/mock-ocr/?sample=<key>   (Field Officer)
+    GET /api/intake/mock-ocr/?sample=<key>   (Contractor)
 
-    Simulates an OCR engine. Returns a mock extraction for the chosen sample
-    document, including a ``form_type`` that tells the workbench which right-pane
-    form to render. Dates are computed relative to *today* so samples stay
+    Simulates an OCR engine so the workbench can be exercised without a physical
+    document. Dates are computed relative to *today* so the samples stay
     meaningful over time (the "expired" sample is always ~400 days old).
     """
 
     def get(self, request):
-        denied = _require_role(request, User.Role.FIELD_OFFICER)
+        denied = _require_role(request, User.Role.CONTRACTOR)
         if denied:
             return denied
 
@@ -1026,70 +1196,69 @@ class MockOcrView(APIView):
         return Response({"sample": sample, **data})
 
 
+def _check_not_expired(date_str, field_label, today):
+    """Return ``(date, error_response)``. Rejects dates more than a year old.
+
+    This is the strict boundary the whole platform hangs on: a document dated
+    more than ``INTAKE_EXPIRY_DAYS`` ago is already expired on arrival and is
+    never accepted, so an expired scan can't be verified into the system.
+    """
+    if not date_str:
+        return None, Response(
+            {"detail": f"{field_label} is required."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    parsed = _parse_iso_date(date_str)
+    if parsed is None:
+        return None, Response(
+            {"detail": f"{field_label} is not a valid ISO date."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if (today - parsed).days > INTAKE_EXPIRY_DAYS:
+        return None, Response(
+            {
+                "detail": f"Rejected: {field_label} ({parsed.isoformat()}) is more "
+                f"than {INTAKE_EXPIRY_DAYS} days old — the document is already "
+                f"expired.",
+                "expired": True,
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return parsed, None
+
+
 class VerifyDocumentView(APIView):
     """
-    POST /api/intake/verify-document/   (Field Officer)
+    POST /api/intake/verify-document/   (Contractor)
 
-    Strict verification-saving endpoint. For MEDICAL / POLICE it enforces that the
-    exam/issue date is not older than 1 year and writes ``expiry_date`` exactly
-    365 days out (the model does this on save). For IDENTITY it marks the named
-    WorkerDocument as Verified.
+    Strict verification-saving endpoint. For MEDICAL / POLICE it enforces that
+    the exam/issue date is not older than 1 year and writes ``expiry_date``
+    exactly 365 days out (the model does this on save). For IDENTITY it marks
+    the named WorkerDocument as Verified.
 
-    Accepts either JSON or multipart/form-data. When multipart, the scanned
-    document is read from the ``file`` field and stored on the record — so the
-    Field Officer can upload the physical document and verify it on the spot.
+    Accepts JSON or multipart/form-data. When multipart, the scanned document is
+    read from the ``file`` field and pushed to the private bucket — so the
+    contractor can upload the physical document and verify it on the spot.
 
     Body: {"worker": <id>, "doc_type": "MEDICAL"|"POLICE"|"IDENTITY", ...fields}
     """
 
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
-    @staticmethod
-    def _as_bool(value):
-        # Multipart sends booleans as strings ("true"/"false"); coerce safely.
-        if isinstance(value, bool):
-            return value
-        return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
     def post(self, request):
-        denied = _require_role(request, User.Role.FIELD_OFFICER)
+        denied = _require_role(request, User.Role.CONTRACTOR)
         if denied:
             return denied
 
-        worker = get_object_or_404(Worker, pk=request.data.get("worker"))
+        worker = _owned_worker(request, request.data.get("worker"))
         doc_type = (request.data.get("doc_type") or "").upper()
         upload = request.FILES.get("file")
         today = timezone.now().date()
-
-        def check_not_expired(date_str, field_label):
-            """Return (date, error_response). Rejects dates > 365 days old."""
-            if not date_str:
-                return None, Response(
-                    {"detail": f"{field_label} is required."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            try:
-                d = timezone.datetime.fromisoformat(str(date_str)).date()
-            except ValueError:
-                return None, Response(
-                    {"detail": f"{field_label} is not a valid ISO date."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            if (today - d).days > INTAKE_EXPIRY_DAYS:
-                return None, Response(
-                    {
-                        "detail": f"Rejected: {field_label} ({d.isoformat()}) is more "
-                        f"than {INTAKE_EXPIRY_DAYS} days old — the document is already "
-                        f"expired.",
-                        "expired": True,
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            return d, None
+        context = _serializer_context(request, sign=True)
 
         if doc_type == "MEDICAL":
-            exam_date, err = check_not_expired(
-                request.data.get("exam_date"), "Medical exam date"
+            exam_date, err = _check_not_expired(
+                request.data.get("exam_date"), "Medical exam date", today
             )
             if err:
                 return err
@@ -1097,24 +1266,23 @@ class VerifyDocumentView(APIView):
                 worker=worker,
                 exam_date=exam_date,
                 defaults={
-                    "color_blindness": self._as_bool(
-                        request.data.get("color_blindness", False)
-                    ),
+                    "color_blindness": _as_bool(request.data.get("color_blindness", False)),
                     "vision": request.data.get("vision", ""),
-                    "vertigo": self._as_bool(request.data.get("vertigo", False)),
+                    "vertigo": _as_bool(request.data.get("vertigo", False)),
                     "blood_type": request.data.get("blood_type", ""),
                 },
             )  # expiry_date computed in model.save()
             if upload:
-                rec.document_file = upload
-                rec.save()
+                rec.storage_key = _store_upload(upload, "intake_docs") or ""
+                rec.save(update_fields=["storage_key"])
             return Response(
-                IntakeMedicalRecordSerializer(rec).data, status=status.HTTP_201_CREATED
+                IntakeMedicalRecordSerializer(rec, context=context).data,
+                status=status.HTTP_201_CREATED,
             )
 
         if doc_type == "POLICE":
-            issue_date, err = check_not_expired(
-                request.data.get("issue_date"), "Police verification issue date"
+            issue_date, err = _check_not_expired(
+                request.data.get("issue_date"), "Police verification issue date", today
             )
             if err:
                 return err
@@ -1129,18 +1297,16 @@ class VerifyDocumentView(APIView):
                 },
             )
             if upload:
-                rec.document_file = upload
-                rec.save()
+                rec.storage_key = _store_upload(upload, "intake_docs") or ""
+                rec.save(update_fields=["storage_key"])
             return Response(
-                IntakePoliceVerificationSerializer(rec).data,
+                IntakePoliceVerificationSerializer(rec, context=context).data,
                 status=status.HTTP_201_CREATED,
             )
 
         if doc_type == "IDENTITY":
             requirement_name = request.data.get("requirement_name", "Aadhar")
-            requirement = RequirementMaster.objects.filter(
-                name=requirement_name
-            ).first()
+            requirement = RequirementMaster.objects.filter(name=requirement_name).first()
             if requirement is None:
                 return Response(
                     {"detail": f"No requirement named '{requirement_name}'."},
@@ -1156,16 +1322,18 @@ class VerifyDocumentView(APIView):
             if expiry:
                 defaults["expiry_date"] = expiry
             doc, _ = WorkerDocument.objects.update_or_create(
-                worker=worker,
-                requirement=requirement,
-                defaults=defaults,
+                worker=worker, requirement=requirement, defaults=defaults
             )
             if upload:
-                doc.document_file = upload
+                old_key = doc.storage_key
+                doc.storage_key = _store_upload(upload, "worker_docs") or ""
                 doc.file_url = ""
-                doc.save()
+                doc.save(update_fields=["storage_key", "file_url"])
+                if old_key and old_key != doc.storage_key:
+                    storage.delete(old_key)
             return Response(
-                WorkerDocumentSerializer(doc).data, status=status.HTTP_201_CREATED
+                WorkerDocumentSerializer(doc, context=context).data,
+                status=status.HTTP_201_CREATED,
             )
 
         return Response(
@@ -1174,8 +1342,476 @@ class VerifyDocumentView(APIView):
         )
 
 
+class OcrExtractView(APIView):
+    """
+    POST /api/intake/ocr-extract/   (Contractor)
+
+    Runs OCR on the uploaded scan and returns best-effort form fields for the
+    given doc_type (IDENTITY | MEDICAL | POLICE). The contractor reviews and
+    corrects the values, then commits via /verify-document/. Provider is
+    env-selected; a failure returns empty fields plus a note rather than an error.
+    """
+
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        denied = _require_role(request, User.Role.CONTRACTOR)
+        if denied:
+            return denied
+
+        upload = request.FILES.get("file")
+        if upload is None:
+            return Response(
+                {"detail": "No file provided under form field 'file'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        doc_type = (request.data.get("doc_type") or "").upper()
+        if doc_type not in {"IDENTITY", "MEDICAL", "POLICE"}:
+            return Response(
+                {"detail": "doc_type must be IDENTITY, MEDICAL or POLICE."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        requirement_name = request.data.get("requirement_name", "")
+        today = timezone.now().date()
+
+        fields, provider, note = ocr.extract_fields(
+            upload.read(), upload.name, upload.content_type,
+            doc_type, requirement_name, today,
+        )
+        return Response(
+            {"form_type": doc_type, "fields": fields, "provider": provider, "note": note}
+        )
+
+
 # ---------------------------------------------------------------------------
-# Trade test — Field-Officer-administered practical MCQ exam
+# Resume scanning
+# ---------------------------------------------------------------------------
+def _read_pages(request) -> list[tuple[bytes, str]]:
+    """Collect resume pages from ``resume`` / ``resume[]`` / ``file`` fields."""
+    files = (
+        request.FILES.getlist("resume")
+        or request.FILES.getlist("resume[]")
+        or request.FILES.getlist("file")
+    )
+    return [(f.read(), f.content_type) for f in files if f]
+
+
+def _persist_candidate_profile(worker, extraction, resume_key, contractor):
+    """Write the parsed resume into the encrypted + filterable schema.
+
+    PII goes through ``set_pii`` (ciphertext + blind index); everything else
+    lands in plaintext, indexable columns. Skills are normalised into the shared
+    vocabulary so two workers who both wrote "Welder" join the same row.
+    """
+    profile, _ = CandidateProfile.objects.get_or_create(
+        worker=worker, defaults={"contractor": contractor}
+    )
+    profile.contractor = contractor
+    profile.set_pii(
+        name=extraction.name or "",
+        phone=extraction.phone or "",
+        email=extraction.email or "",
+    )
+    profile.place = extraction.place or ""
+    profile.stream = extraction.stream or ""
+    profile.category = extraction.category or ""
+    profile.years_of_experience = extraction.years_of_experience
+    profile.qualification = extraction.qualification or ""
+    if resume_key:
+        old_key = profile.resume_key
+        profile.resume_key = resume_key
+        if old_key and old_key != resume_key:
+            storage.delete(old_key)
+    profile.parser_provider = extraction.provider or ""
+    profile.parse_note = (extraction.note or "")[:300]
+    profile.save()
+
+    profile.sync_name_tokens(extraction.name)
+
+    # Replace the skill set wholesale — a re-scan is the new truth.
+    profile.candidate_skills.all().delete()
+    for raw in extraction.skills:
+        skill = Skill.get_or_create_normalised(raw)
+        if skill is not None:
+            CandidateSkill.objects.get_or_create(profile=profile, skill=skill)
+    return profile
+
+
+class ResumeParseView(APIView):
+    """
+    POST /api/resume/parse/   (Contractor)
+
+    Parse a resume and return the structured fields **without committing**, so
+    the contractor can review the extraction before it is saved. Send
+    ``worker=<id>`` as well to store it against that worker in the same call.
+    """
+
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        denied = _require_role(request, User.Role.CONTRACTOR)
+        if denied:
+            return denied
+
+        pages = _read_pages(request)
+        if not pages:
+            return Response(
+                {"detail": "No resume file provided under form field 'resume'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        extraction = resume_parser.parse_resume(pages)
+
+        worker_id = request.data.get("worker")
+        if not worker_id:
+            # Preview only — nothing is persisted, so nothing is encrypted yet.
+            return Response({"committed": False, **extraction.as_dict()})
+
+        worker = _owned_worker(request, worker_id)
+        resume_key = storage.upload(
+            pages[0][0], pages[0][1], "resumes", "resume"
+        )
+        profile = _persist_candidate_profile(worker, extraction, resume_key, request.user)
+        return Response(
+            {
+                "committed": True,
+                **extraction.as_dict(),
+                "profile": CandidateProfileSerializer(
+                    profile, context=_serializer_context(request, sign=True)
+                ).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class CandidateSearchView(APIView):
+    """
+    GET /api/candidates/search/   (Contractor)
+
+    Multi-attribute fuzzy filter over the contractor's own candidate profiles.
+
+    Query params: ``q`` (name — matched through the blind index, never by
+    decrypting), ``place``, ``stream``, ``category``, ``qualification``,
+    ``skill`` (repeatable), ``min_experience``, ``max_experience``.
+    """
+
+    def get(self, request):
+        denied = _require_role(request, User.Role.CONTRACTOR)
+        if denied:
+            return denied
+
+        qs = (
+            CandidateProfile.objects.filter(contractor=request.user)
+            .select_related("worker")
+            .prefetch_related("candidate_skills__skill")
+        )
+
+        params = request.query_params
+        for field in ("place", "stream", "category", "qualification"):
+            value = (params.get(field) or "").strip()
+            if value:
+                qs = qs.filter(**{f"{field}__icontains": value})
+
+        for skill in [s for s in params.getlist("skill") if s.strip()]:
+            qs = qs.filter(candidate_skills__skill__name__icontains=skill.strip().lower())
+
+        for param, lookup in (("min_experience", "gte"), ("max_experience", "lte")):
+            raw = params.get(param)
+            if raw not in (None, ""):
+                try:
+                    qs = qs.filter(**{f"years_of_experience__{lookup}": int(raw)})
+                except ValueError:
+                    pass
+
+        # Name search rides the blind index: hash the query the same way the
+        # tokens were hashed and do an indexed equality probe. No decryption,
+        # and the pepper never leaves this process.
+        query = (params.get("q") or "").strip()
+        if query:
+            digests = crypto.name_query_tokens(query)
+            if digests:
+                qs = qs.filter(name_tokens__token_hash__in=digests)
+            else:
+                qs = qs.none()
+
+        qs = qs.distinct()[:100]
+        context = _serializer_context(request, sign=True)
+        return Response(
+            {
+                "count": len(qs),
+                "results": [
+                    {
+                        "profile": CandidateProfileSerializer(p, context=context).data,
+                        "worker": {
+                            "id": p.worker_id,
+                            "name": p.worker.name,
+                            "skill_type": p.worker.skill_type,
+                            "aadhar_number": p.worker.aadhar_number,
+                        },
+                    }
+                    for p in qs
+                ],
+            }
+        )
+
+
+# ---------------------------------------------------------------------------
+# Unified worker onboarding — all 5 validation pillars + resume, in one pass
+# ---------------------------------------------------------------------------
+class UnifiedIntakeView(APIView):
+    """
+    POST /api/intake/onboard-worker/   (Contractor, multipart)
+
+    Creates a worker and every document in a single submission:
+
+      identity   name, aadhar_number, skill_type
+      Aadhaar    aadhaar_file
+      PAN        pan_file, pan_number
+      Safety     safety_file, safety_expiry
+      Medical    medical_file, exam_date, vision, blood_type,
+                 color_blindness, vertigo
+      PVC        pvc_file, certificate_number, issue_date
+      Resume     resume_file  (parsed → encrypted PII + filterable profile)
+
+    Order matters: **validate everything first**, then upload all files
+    concurrently, then write the database rows in one transaction. Validating
+    up front means an expired medical never leaves a half-created worker behind,
+    and the concurrent upload keeps a six-document intake at roughly the cost of
+    its slowest single file.
+    """
+
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        denied = _require_role(request, User.Role.CONTRACTOR)
+        if denied:
+            return denied
+
+        data = request.data
+        today = timezone.now().date()
+
+        # -- 1. validate the worker identity --------------------------------
+        name = (data.get("name") or "").strip()
+        aadhar = (data.get("aadhar_number") or "").strip()
+        skill = (data.get("skill_type") or "").strip()
+        if not (name and aadhar and skill):
+            return Response(
+                {"detail": "name, aadhar_number and skill_type are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(aadhar) != 12 or not aadhar.isdigit():
+            return Response(
+                {"detail": "Aadhar number must be exactly 12 digits."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if Worker.objects.filter(aadhar_number=aadhar).exists():
+            return Response(
+                {"detail": f"A worker with Aadhar {aadhar} already exists."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # -- 2. validate the dated pillars before touching anything ---------
+        exam_date = issue_date = None
+        if request.FILES.get("medical_file") or data.get("exam_date"):
+            exam_date, err = _check_not_expired(
+                data.get("exam_date"), "Medical exam date", today
+            )
+            if err:
+                return err
+        if request.FILES.get("pvc_file") or data.get("issue_date"):
+            issue_date, err = _check_not_expired(
+                data.get("issue_date"), "Police verification issue date", today
+            )
+            if err:
+                return err
+
+        requirements_by_name = {r.name: r for r in RequirementMaster.objects.all()}
+
+        # -- 3. upload every attached file concurrently ---------------------
+        slots = [
+            ("aadhaar", "aadhaar_file", "worker_docs"),
+            ("pan", "pan_file", "worker_docs"),
+            ("safety", "safety_file", "worker_docs"),
+            ("medical", "medical_file", "intake_docs"),
+            ("pvc", "pvc_file", "intake_docs"),
+            ("resume", "resume_file", "resumes"),
+        ]
+        items, resume_pages = [], []
+        for slot, field_name, prefix in slots:
+            upload = request.FILES.get(field_name)
+            if upload is None:
+                continue
+            blob = upload.read()
+            if not blob:
+                continue
+            items.append({
+                "slot": slot,
+                "data": blob,
+                "content_type": upload.content_type,
+                "prefix": prefix,
+                "filename": upload.name,
+            })
+            if slot == "resume":
+                resume_pages.append((blob, upload.content_type))
+
+        keys = storage.upload_many(items)
+
+        # -- 4. parse the resume (never fatal) ------------------------------
+        extraction = (
+            resume_parser.parse_resume(resume_pages) if resume_pages else None
+        )
+
+        # -- 5. one transaction for the whole worker ------------------------
+        created_docs = []
+        try:
+            with transaction.atomic():
+                worker = Worker.objects.create(
+                    name=name,
+                    aadhar_number=aadhar,
+                    skill_type=skill,
+                    contractor=request.user,
+                )
+
+                def identity_doc(requirement_name, slot, number="", expiry=None):
+                    requirement = requirements_by_name.get(requirement_name)
+                    if requirement is None or (slot not in keys and not number):
+                        return
+                    doc = WorkerDocument.objects.create(
+                        worker=worker,
+                        requirement=requirement,
+                        document_number=number or "",
+                        storage_key=keys.get(slot, ""),
+                        expiry_date=expiry,
+                        verification_status=WorkerDocument.Status.VERIFIED,
+                    )
+                    created_docs.append(doc)
+
+                identity_doc("Aadhar", "aadhaar", aadhar)
+                identity_doc("PAN", "pan", (data.get("pan_number") or "").strip())
+                identity_doc(
+                    "Safety Training",
+                    "safety",
+                    (data.get("safety_number") or "").strip(),
+                    _parse_iso_date(data.get("safety_expiry")),
+                )
+
+                if exam_date is not None:
+                    IntakeMedicalRecord.objects.create(
+                        worker=worker,
+                        exam_date=exam_date,
+                        color_blindness=_as_bool(data.get("color_blindness", False)),
+                        vertigo=_as_bool(data.get("vertigo", False)),
+                        vision=data.get("vision", ""),
+                        blood_type=data.get("blood_type", ""),
+                        storage_key=keys.get("medical", ""),
+                    )
+
+                if issue_date is not None:
+                    IntakePoliceVerification.objects.create(
+                        worker=worker,
+                        issue_date=issue_date,
+                        certificate_number=data.get("certificate_number", ""),
+                        verification_status=data.get(
+                            "verification_status", WorkerDocument.Status.VERIFIED
+                        ),
+                        storage_key=keys.get("pvc", ""),
+                    )
+
+                if extraction is not None:
+                    _persist_candidate_profile(
+                        worker, extraction, keys.get("resume", ""), request.user
+                    )
+        except Exception:
+            # The DB write failed after the objects landed in the bucket —
+            # clean them up rather than leaving orphans behind.
+            for key in keys.values():
+                storage.delete(key)
+            raise
+
+        worker = _prefetched(Worker.objects.filter(pk=worker.pk)).first()
+        context = _serializer_context(request, sign=True)
+        return Response(
+            {
+                "worker": WorkerSerializer(worker, context=context).data,
+                "compliance": worker.compliance_snapshot(),
+                "documents_stored": sorted(keys.keys()),
+                "resume": extraction.as_dict() if extraction else None,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Storage — fresh signed links + the local-fallback object server
+# ---------------------------------------------------------------------------
+class SignedUrlView(APIView):
+    """
+    POST /api/storage/signed-url/   (Contractor / PE)
+
+    Body: ``{"keys": ["worker_docs/2026/…", …]}``
+    Returns ``{key: url}`` with links valid for ``PRESIGN_EXPIRY_SECONDS``.
+
+    Batching matters: a document table needs one link per row, and one HTTP
+    round trip per row would make the table crawl.
+    """
+
+    def post(self, request):
+        denied = _require_role(
+            request, User.Role.CONTRACTOR, User.Role.PRINCIPAL_EMPLOYER
+        )
+        if denied:
+            return denied
+
+        keys = request.data.get("keys") or []
+        if not isinstance(keys, list):
+            return Response(
+                {"detail": "keys must be a list of object keys."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response({"urls": storage.signed_urls(keys[:200])})
+
+
+class StorageObjectView(APIView):
+    """
+    GET /api/storage/object/?key=…&expires=…&signature=…
+
+    Serves an object from the **local fallback** backend after verifying the
+    HMAC signature and expiry. Unauthenticated by design: the signed URL *is*
+    the capability, exactly as with a Supabase signed link. When Supabase is
+    configured this route is never used — links point at Supabase directly.
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        backend = storage.get_storage()
+        if not isinstance(backend, storage.LocalSignedStorage):
+            raise Http404("Objects are served directly by Supabase.")
+
+        key = request.query_params.get("key") or ""
+        signature = request.query_params.get("signature") or ""
+        try:
+            expires = int(request.query_params.get("expires") or 0)
+        except ValueError:
+            expires = 0
+
+        if not backend.verify(key, expires, signature):
+            return Response(
+                {"detail": "This link is invalid or has expired."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        try:
+            path = backend.path_for(key)
+        except storage.StorageError:
+            raise Http404("Unknown object.")
+        if not path.exists():
+            raise Http404("Unknown object.")
+        return FileResponse(path.open("rb"))
+
+
+# ---------------------------------------------------------------------------
+# Trade test — Contractor-administered practical MCQ exam
 # ---------------------------------------------------------------------------
 def _trade_test_state(worker):
     """Current attempt bookkeeping for a worker."""
@@ -1191,7 +1827,7 @@ def _trade_test_state(worker):
 
 class TradeTestStartView(APIView):
     """
-    GET /api/trade-test/start/?worker_id=<id>   (Field Officer)
+    GET /api/trade-test/start/?worker_id=<id>   (Contractor)
 
     Validates the worker has remaining attempts and has not already passed, then
     returns exactly 5 random questions for the worker's skill category — WITHOUT
@@ -1199,11 +1835,11 @@ class TradeTestStartView(APIView):
     """
 
     def get(self, request):
-        denied = _require_role(request, User.Role.FIELD_OFFICER)
+        denied = _require_role(request, User.Role.CONTRACTOR)
         if denied:
             return denied
 
-        worker = get_object_or_404(Worker, pk=request.query_params.get("worker_id"))
+        worker = _owned_worker(request, request.query_params.get("worker_id"))
         state = _trade_test_state(worker)
 
         if state["passed"]:
@@ -1247,7 +1883,7 @@ class TradeTestStartView(APIView):
 
 class TradeTestSubmitView(APIView):
     """
-    POST /api/trade-test/submit-attempt/   (Field Officer)
+    POST /api/trade-test/submit-attempt/   (Contractor)
 
     Body: {"worker_id": <id>, "answers": [{"question_id": <id>, "selected_option": "A"}]}
 
@@ -1256,11 +1892,11 @@ class TradeTestSubmitView(APIView):
     """
 
     def post(self, request):
-        denied = _require_role(request, User.Role.FIELD_OFFICER)
+        denied = _require_role(request, User.Role.CONTRACTOR)
         if denied:
             return denied
 
-        worker = get_object_or_404(Worker, pk=request.data.get("worker_id"))
+        worker = _owned_worker(request, request.data.get("worker_id"))
         state = _trade_test_state(worker)
         if state["passed"]:
             return Response(
@@ -1289,9 +1925,7 @@ class TradeTestSubmitView(APIView):
                 continue
 
         questions = TradeTestQuestion.objects.filter(id__in=selected.keys())
-        score = sum(
-            1 for q in questions if selected.get(q.id) == q.correct_option
-        )
+        score = sum(1 for q in questions if selected.get(q.id) == q.correct_option)
         passed = score >= TRADE_TEST_PASS_MARK
         attempt_number = state["attempts_used"] + 1
 
@@ -1330,20 +1964,21 @@ class TradeTestSubmitView(APIView):
 # ---------------------------------------------------------------------------
 class SafetyVideoHeartbeatView(APIView):
     """
-    POST /api/safety-video/heartbeat/   (Field Officer)
+    POST /api/safety-video/heartbeat/   (Contractor)
 
-    Records how much of the mandatory safety induction video a worker has watched.
-    ``is_completed`` flips to True at 100%. Progress never moves backwards.
+    Records how much of the mandatory safety induction video a worker has
+    watched. ``is_completed`` flips to True at 100%. Progress never moves
+    backwards.
 
     Body: {"worker": <id>, "progress_percentage": <0-100>}
     """
 
     def post(self, request):
-        denied = _require_role(request, User.Role.FIELD_OFFICER)
+        denied = _require_role(request, User.Role.CONTRACTOR)
         if denied:
             return denied
 
-        worker = get_object_or_404(Worker, pk=request.data.get("worker"))
+        worker = _owned_worker(request, request.data.get("worker"))
         try:
             pct = int(request.data.get("progress_percentage", 0))
         except (TypeError, ValueError):
@@ -1364,188 +1999,4 @@ class SafetyVideoHeartbeatView(APIView):
                 "progress_percentage": sv.progress_percentage,
                 "is_completed": sv.is_completed,
             }
-        )
-
-
-# ---------------------------------------------------------------------------
-# Real OCR extraction — pluggable provider (OCR.space default), mock fallback
-# ---------------------------------------------------------------------------
-# Provider is chosen by the OCR_PROVIDER env var:
-#   "ocrspace"  (default) -> free hosted OCR.space API (set OCRSPACE_API_KEY)
-#   "tesseract"           -> local Tesseract binary (dev only; not on Render native)
-#   "mock"                -> canned sample values (no network, always works)
-#   "claude"              -> Anthropic vision (paid; requires `anthropic` + key)
-# Any provider failure falls back to empty fields + a "enter manually" note, so
-# the Field Officer workflow never breaks.
-
-_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2}|\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4})\b")
-
-
-def _to_iso_date(raw: str):
-    raw = (raw or "").strip()
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y",
-                "%m/%d/%Y", "%d %b %Y", "%d %B %Y"):
-        try:
-            return timezone.datetime.strptime(raw, fmt).date().isoformat()
-        except ValueError:
-            continue
-    return None
-
-
-def _first_date(text: str):
-    match = _DATE_RE.search(text or "")
-    return _to_iso_date(match.group(1)) if match else None
-
-
-def _ocrspace_text(file_bytes, filename, content_type) -> str:
-    """Call the free OCR.space API and return the concatenated parsed text."""
-    import requests
-
-    api_key = os.environ.get("OCRSPACE_API_KEY", "helloworld")  # public demo key
-    resp = requests.post(
-        "https://api.ocr.space/parse/image",
-        files={"file": (filename or "upload", file_bytes, content_type or "application/octet-stream")},
-        data={"apikey": api_key, "language": "eng", "OCREngine": "2",
-              "isOverlayRequired": "false", "scale": "true"},
-        timeout=40,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    if data.get("IsErroredOnProcessing"):
-        raise RuntimeError(data.get("ErrorMessage") or "OCR.space processing error")
-    results = data.get("ParsedResults") or []
-    return "\n".join(r.get("ParsedText", "") for r in results).strip()
-
-
-def _tesseract_text(file_bytes) -> str:
-    import pytesseract
-    from PIL import Image
-
-    return pytesseract.image_to_string(Image.open(io.BytesIO(file_bytes)))
-
-
-def _parse_fields(text: str, doc_type: str, requirement_name: str = "") -> dict:
-    """Best-effort field extraction from raw OCR text. The FO verifies/corrects."""
-    t = text or ""
-    up = t.upper()
-
-    if doc_type == "MEDICAL":
-        vm = re.search(r"\b6\s*/\s*(6|9|12|18|24|36|60)\b", t)
-        # No trailing \b — a sign like "+" is non-word, so "B+" has no boundary after it.
-        bm = re.search(r"\b(AB|A|B|O)\s*([+\-]|POS|NEG)", up)
-        blood = ""
-        if bm:
-            blood = bm.group(1) + ("+" if bm.group(2) in ("+", "POS") else "-")
-        flagged = re.compile(r"DETECT|PRESENT|POSITIVE|\bYES\b")
-        return {
-            "exam_date": _first_date(t) or "",
-            "vision": ("6/" + vm.group(1)) if vm else "",
-            "blood_type": blood,
-            "color_blindness": bool(re.search(r"COLOU?R\s*BLIND", up)) and bool(flagged.search(up)),
-            "vertigo": bool(re.search(r"VERTIGO", up)) and bool(flagged.search(up)),
-        }
-
-    if doc_type == "POLICE":
-        cert = re.search(r"\b([A-Z]{2,}[-/ ]?\d[\w-]*)\b", t)
-        return {
-            "certificate_number": cert.group(1) if cert else "",
-            "issue_date": _first_date(t) or "",
-            "verification_status": "Verified",
-        }
-
-    # IDENTITY (Aadhaar / PAN). Use a literal space (not \s) between groups so the
-    # match can't span a newline and swallow a nearby date's year.
-    aadhaar = re.search(r"\b(\d{4} ?\d{4} ?\d{4})\b", t)
-    pan = re.search(r"\b([A-Z]{5}\d{4}[A-Z])\b", up)
-    number = ""
-    if requirement_name == "PAN" and pan:
-        number = pan.group(1)
-    elif aadhaar:
-        number = re.sub(r"\s", "", aadhaar.group(1))
-    elif pan:
-        number = pan.group(1)
-    name = ""
-    for line in t.splitlines():
-        s = line.strip()
-        if re.fullmatch(r"[A-Za-z ]{4,40}", s) and not re.search(
-            r"GOVERNMENT|INDIA|MALE|FEMALE|DOB|YEAR|BIRTH|FATHER|ADDRESS|"
-            r"PERMANENT|ACCOUNT|INCOME|DEPARTMENT|CARD|\bNAME\b|GENDER|AADHAAR|"
-            r"WORKER|CERTIFICATE|VERIFICATION|FITNESS|MEDICAL|POLICE|STATUS|"
-            r"ISSUE|EXAM|VISION|VERTIGO|BLOOD|COLOU?R|DETECTED|NONE|VERIFIED",
-            s.upper(),
-        ):
-            name = s.title()
-            break
-    return {"name": name, "aadhar_number": number, "document_number": number}
-
-
-def _mock_fields(doc_type: str, requirement_name: str, today) -> dict:
-    if doc_type == "MEDICAL":
-        return {"exam_date": (today - timedelta(days=30)).isoformat(), "vision": "6/6",
-                "blood_type": "O+", "color_blindness": False, "vertigo": False}
-    if doc_type == "POLICE":
-        return {"certificate_number": "PVC-DEMO-1001",
-                "issue_date": (today - timedelta(days=30)).isoformat(),
-                "verification_status": "Verified"}
-    num = "ABCDE1234F" if requirement_name == "PAN" else "100000000001"
-    return {"name": "Ravi Kumar", "aadhar_number": num, "document_number": num}
-
-
-def _extract_fields(file_bytes, filename, content_type, doc_type, requirement_name, today):
-    provider = os.environ.get("OCR_PROVIDER", "ocrspace").lower()
-    if provider == "mock":
-        return _mock_fields(doc_type, requirement_name, today), "mock", None
-
-    text, err = None, None
-    try:
-        if provider == "tesseract":
-            text = _tesseract_text(file_bytes)
-        else:  # "ocrspace" (default)
-            text = _ocrspace_text(file_bytes, filename, content_type)
-    except Exception as exc:  # noqa: BLE001 — degrade to manual entry, never 500
-        err = str(exc)
-
-    if not text or not text.strip():
-        return {}, provider, err or "No text detected — enter the values manually."
-    return _parse_fields(text, doc_type, requirement_name), provider, None
-
-
-class OcrExtractView(APIView):
-    """
-    POST /api/intake/ocr-extract/   (Field Officer)
-
-    Runs OCR on the uploaded scan and returns best-effort form fields for the
-    given doc_type (IDENTITY | MEDICAL | POLICE). The FO reviews/corrects the
-    values, then commits via /verify-document/. Provider is env-selected; a
-    failure returns empty fields + a note rather than an error.
-    """
-
-    parser_classes = [MultiPartParser, FormParser]
-
-    def post(self, request):
-        denied = _require_role(request, User.Role.FIELD_OFFICER)
-        if denied:
-            return denied
-
-        upload = request.FILES.get("file")
-        if upload is None:
-            return Response(
-                {"detail": "No file provided under form field 'file'."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        doc_type = (request.data.get("doc_type") or "").upper()
-        if doc_type not in {"IDENTITY", "MEDICAL", "POLICE"}:
-            return Response(
-                {"detail": "doc_type must be IDENTITY, MEDICAL or POLICE."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        requirement_name = request.data.get("requirement_name", "")
-        today = timezone.now().date()
-
-        fields, provider, note = _extract_fields(
-            upload.read(), upload.name, upload.content_type,
-            doc_type, requirement_name, today,
-        )
-        return Response(
-            {"form_type": doc_type, "fields": fields, "provider": provider, "note": note}
         )

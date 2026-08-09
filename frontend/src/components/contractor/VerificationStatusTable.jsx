@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
-import { api } from '../api'
-import { useAuth } from '../context/AuthContext.jsx'
+import { api } from '../../api'
+import { useAuth } from '../../context/AuthContext.jsx'
 
-// Column order for the verification matrix.
+// Column order for the verification matrix. Resume joins the five pillars —
+// every row now covers the full onboarding surface.
 const COLUMNS = [
   { key: 'Aadhar', label: 'Aadhaar' },
   { key: 'PAN', label: 'PAN' },
@@ -11,10 +12,11 @@ const COLUMNS = [
   { key: 'POLICE', label: 'Police' },
   { key: 'TRADE_TEST', label: 'Trade Test' },
   { key: 'SAFETY_VIDEO', label: 'Safety Video' },
+  { key: 'RESUME', label: 'Resume' },
 ]
 
 // Map a status to a badge tone + short glyph.
-function badge(status) {
+export function badge(status) {
   const s = (status || '').toUpperCase()
   if (s === 'VERIFIED' || s === 'PASSED') return { tone: 'green', text: '✅ Verified' }
   if (s === 'PENDING') return { tone: 'amber', text: '⏳ Pending' }
@@ -25,7 +27,7 @@ function badge(status) {
   return { tone: 'grey', text: '— Missing' } // MISSING
 }
 
-export default function VerificationStatusTable() {
+export default function VerificationStatusTable({ onChanged }) {
   const { token } = useAuth()
   const [rows, setRows] = useState([])
   const [loading, setLoading] = useState(true)
@@ -47,8 +49,9 @@ export default function VerificationStatusTable() {
   async function remove(row) {
     if (
       !window.confirm(
-        `Delete ${row.name}? This permanently removes the worker and all their ` +
-          `records (documents, medical, police, trade test, safety video).`
+        `Delete ${row.name}? This permanently removes the worker, all their records ` +
+          `(documents, medical, police, trade test, safety video, resume profile) ` +
+          `and every stored file.`
       )
     )
       return
@@ -57,6 +60,7 @@ export default function VerificationStatusTable() {
     try {
       await api.deleteWorker(token, row.id)
       setRows((rs) => rs.filter((r) => r.id !== row.id))
+      onChanged?.()
     } catch (e) {
       setError(e.message)
     } finally {
@@ -87,8 +91,8 @@ export default function VerificationStatusTable() {
   return (
     <div>
       <p className="muted">
-        Every worker in the registry and the status of each verification type.
-        Click 📎 to open the uploaded document.
+        Every worker in your pool and the status of each verification type. Click 📎 to
+        open a document — links are short-lived and expire.
       </p>
 
       <div className="vs-toolbar">
@@ -134,7 +138,6 @@ export default function VerificationStatusTable() {
                     <strong>{row.name}</strong>
                     <div className="muted">
                       {row.skill_type} · {row.aadhar_number}
-                      {row.contractor_email ? ` · ${row.contractor_email}` : ''}
                     </div>
                   </td>
                   {COLUMNS.map((c) => {
@@ -149,7 +152,7 @@ export default function VerificationStatusTable() {
                             href={it.doc_url}
                             target="_blank"
                             rel="noreferrer"
-                            title="Open uploaded document"
+                            title="Open document (link expires)"
                           >
                             📎
                           </a>

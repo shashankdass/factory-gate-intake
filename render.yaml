@@ -9,6 +9,10 @@
 # If either name is already taken globally, Render appends a suffix — after the
 # first deploy, confirm the real URLs and update CORS_ALLOWED_ORIGINS /
 # VITE_API_BASE_URL below, then redeploy. (See DEPLOY.md.)
+#
+# Secrets marked `sync: false` are NOT stored in this file — Render prompts for
+# them once at blueprint import. That covers the object-storage credentials and
+# any resume-parser API key.
 
 databases:
   - name: gate-intake-db
@@ -25,7 +29,8 @@ services:
     plan: free
     buildCommand: "pip install -r requirements.txt && python manage.py collectstatic --noinput"
     # Migrate + seed on every deploy so a fresh DB always has the dummy personas.
-    # Both steps are idempotent.
+    # Both steps are idempotent. Migration 0007 installs pgcrypto + pg_trgm and
+    # the app_encrypt/app_decrypt/app_blind_index helpers.
     startCommand: "python manage.py migrate --noinput && python manage.py seed_data && gunicorn core.wsgi:application --bind 0.0.0.0:$PORT"
     envVars:
       - key: DATABASE_URL
@@ -42,9 +47,57 @@ services:
         value: "https://gate-intake-web.onrender.com"
       - key: PYTHON_VERSION
         value: "3.12.6"
-      # OCR for the Field Officer workbench. Default free provider is OCR.space;
-      # "helloworld" is its public demo key — replace with your own free key
-      # (no card) from https://ocr.space/ocrapi for higher limits.
+
+      # ---- Column-level PII encryption ----
+      # Generated once by Render and then held constant. Rotating
+      # PII_ENCRYPTION_KEY makes existing candidate name/phone/email
+      # unrecoverable; rotating PII_BLIND_INDEX_KEY breaks name search and
+      # duplicate detection for existing rows. They must differ from each other,
+      # which two independent generateValue entries guarantee.
+      - key: PII_ENCRYPTION_KEY
+        generateValue: true
+      - key: PII_BLIND_INDEX_KEY
+        generateValue: true
+
+      # ---- Object storage (S3-compatible, PRIVATE bucket) ----
+      # Supabase Storage: https://<project-ref>.supabase.co/storage/v1/s3
+      # Create the bucket as private, then mint an S3 access key under
+      # Project Settings → Storage → S3 access keys.
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: S3_BUCKET
+        value: "gate-intake-docs"
+      - key: S3_REGION
+        # Supabase requires the project's real region and rejects "auto".
+        # Use "auto" only for Cloudflare R2.
+        value: "ap-south-1"
+      - key: S3_KEY_PREFIX
+        value: "gate-intake"
+      - key: PRESIGN_EXPIRY_SECONDS
+        value: "900"
+
+      # ---- Resume parsing ----
+      # "ocr" needs no key and works out of the box. Switch to "claude" or
+      # "gemini" for materially better extraction, and supply the matching key
+      # (add `anthropic` / `google-genai` to requirements.txt first).
+      - key: RESUME_PARSER_PROVIDER
+        value: "ocr"
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ANTHROPIC_MODEL
+        value: "claude-opus-5"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: REQUIRE_RESUME_FOR_COMPLIANCE
+        value: "False"
+
+      # ---- OCR for the intake workbench ----
+      # Default free provider is OCR.space; "helloworld" is its public demo key —
+      # replace with your own free key (no card) from https://ocr.space/ocrapi.
       - key: OCR_PROVIDER
         value: "ocrspace"
       - key: OCRSPACE_API_KEY

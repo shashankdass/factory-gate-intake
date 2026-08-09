@@ -1253,3 +1253,261 @@ textarea {
 .vs-del:hover {
   background: #fef2f2;
 }
+
+/* ==========================================================================
+   Contractor Suite — page header, sub-tabs, workforce demand, unified intake
+   ========================================================================== */
+.page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.page-head h1 {
+  margin: 0;
+}
+
+.tabs.sub {
+  margin-top: 6px;
+}
+
+.wc-skills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+/* --- Workforce demand ---------------------------------------------------- */
+.wd-form {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 18px;
+}
+.wd-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.wd-count {
+  width: 84px;
+  text-align: center;
+  font-weight: 700;
+  font-size: 16px;
+  padding: 9px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.wd-skill {
+  flex: 1;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.wd-actions {
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.wd-project select {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.wd-summary {
+  margin-bottom: 16px;
+}
+.wd-lines {
+  display: grid;
+  gap: 12px;
+}
+.wd-line {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--grey);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+.wd-line.met {
+  border-left-color: var(--green);
+}
+.wd-line.short {
+  border-left-color: var(--red);
+}
+.wd-line-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.wd-workers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 12px;
+}
+.wd-fixable {
+  margin-top: 10px;
+}
+.wd-fixable summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+}
+.pill.green {
+  background: #ecfdf5;
+  color: var(--green);
+  border-color: #a7f3d0;
+}
+
+/* --- Unified intake overlay ---------------------------------------------- */
+.ui-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.55);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 24px 16px;
+  z-index: 100;
+  overflow-y: auto;
+}
+.ui-panel {
+  background: var(--card);
+  border-radius: 14px;
+  width: min(980px, 100%);
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.28);
+  display: flex;
+  flex-direction: column;
+  outline: none;
+}
+.ui-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--border);
+}
+.ui-head h2 {
+  margin: 0 0 4px;
+}
+.ui-head p {
+  margin: 0;
+  max-width: 62ch;
+}
+.ui-body {
+  padding: 20px 24px;
+  display: grid;
+  gap: 22px;
+}
+.ui-section h3 {
+  margin: 0 0 12px;
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--muted);
+}
+.ui-subhead {
+  margin: 16px 0 8px;
+  font-weight: 600;
+  font-size: 13px;
+}
+.ui-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 12px;
+}
+.ui-checks {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.ui-slots {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+}
+.ui-slot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.ui-slot.filled {
+  border-style: solid;
+  border-color: #a7f3d0;
+  background: #f0fdf4;
+}
+.ui-slot-label {
+  font-weight: 600;
+  font-size: 14px;
+}
+.ui-resume {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+  background: #f8fafc;
+}
+.ui-resume-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 6px 18px;
+}
+.ui-resume-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px dotted var(--border);
+  padding: 4px 0;
+}
+.ui-skills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 12px 0;
+}
+.ui-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 24px;
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.ui-done {
+  text-align: center;
+  padding: 18px;
+}
+.ui-done-main {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--green);
+  margin-bottom: 6px;
+}
+
+/* --- Gate verdict detail ------------------------------------------------- */
+.verdict-gaps {
+  margin: 12px auto 0;
+  padding-left: 20px;
+  text-align: left;
+  max-width: 60ch;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.verdict-stamp {
+  margin-top: 12px;
+  font-size: 12px;
+  opacity: 0.8;
+}

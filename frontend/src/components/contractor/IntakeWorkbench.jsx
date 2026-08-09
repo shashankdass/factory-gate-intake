@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { api } from '../api'
-import { useAuth } from '../context/AuthContext.jsx'
+import { api } from '../../api'
+import { useAuth } from '../../context/AuthContext.jsx'
 
-// What the Field Officer can process. Identity docs map to a WorkerDocument
-// requirement; Medical/Police map to their structured 1-year-validity records.
+// What the contractor can process one document at a time. Identity docs map to a
+// WorkerDocument requirement; Medical/Police map to their structured
+// 1-year-validity records. Onboarding a *new* worker with all six documents at
+// once is the Unified Intake overlay's job — this pane is for fixing or
+// re-verifying a single document on an existing worker.
 const DOC_TYPES = [
   { value: 'IDENTITY:Aadhar', label: 'Aadhar Card', formType: 'IDENTITY', requirement: 'Aadhar' },
   { value: 'IDENTITY:PAN', label: 'PAN Card', formType: 'IDENTITY', requirement: 'PAN' },
@@ -32,7 +35,7 @@ const OPTION_KEYS = ['A', 'B', 'C', 'D']
 const SAFETY_VIDEO_SRC = 'https://www.w3schools.com/html/mov_bbb.mp4'
 
 // --- Reusable hook: is an ISO date string more than 365 days old? ----------
-function useExpiryCheck(isoDate) {
+export function useExpiryCheck(isoDate) {
   return useMemo(() => {
     if (!isoDate) return { expired: false, daysOld: null }
     const then = new Date(isoDate)
@@ -42,9 +45,8 @@ function useExpiryCheck(isoDate) {
   }, [isoDate])
 }
 
-export default function FieldOfficerIntakeWorkbench() {
+export default function IntakeWorkbench({ workers = [], onChanged }) {
   const { token } = useAuth()
-  const [workers, setWorkers] = useState([])
   const [workerId, setWorkerId] = useState(null)
   const [docSel, setDocSel] = useState('') // one of DOC_TYPES[].value
   const [form, setForm] = useState({})
@@ -53,124 +55,22 @@ export default function FieldOfficerIntakeWorkbench() {
   const [busy, setBusy] = useState(false)
   const [extracting, setExtracting] = useState(false)
   const [msg, setMsg] = useState(null)
-  // Add-worker-from-scratch panel.
-  const [contractors, setContractors] = useState([])
-  const [showAdd, setShowAdd] = useState(false)
-  const [newWorker, setNewWorker] = useState({ name: '', aadhar_number: '', skill_type: '', contractor: '' })
-  const [newAadhaarScan, setNewAadhaarScan] = useState(null) // { file, url }
-  const [addExtracting, setAddExtracting] = useState(false)
-  const [addBusy, setAddBusy] = useState(false)
-  const [addMsg, setAddMsg] = useState(null)
   const fileInputRef = useRef(null)
-  const newScanInputRef = useRef(null)
 
   const current = DOC_TYPES.find((d) => d.value === docSel) || null
   const formType = current?.formType || null
 
-  const loadWorkers = (selectId) =>
-    api.workers(token).then((w) => {
-      setWorkers(w)
-      setWorkerId((id) => selectId ?? id ?? (w[0]?.id ?? null))
-      return w
-    })
-
+  // Keep a valid selection as the pool changes underneath us.
   useEffect(() => {
-    if (!token) return
-    loadWorkers()
-    api.contractors(token).then(setContractors).catch(() => {})
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token])
-
-  function onNewAadhaarFile(f) {
-    if (!f) return
-    if (newAadhaarScan?.url) URL.revokeObjectURL(newAadhaarScan.url)
-    setNewAadhaarScan({ file: f, url: URL.createObjectURL(f) })
-    setAddMsg(null)
-  }
-
-  // OCR the uploaded Aadhaar card and prefill name + number for the officer to verify.
-  async function readNewAadhaar() {
-    if (!newAadhaarScan?.file) return
-    setAddExtracting(true)
-    setAddMsg(null)
-    try {
-      const fd = new FormData()
-      fd.append('file', newAadhaarScan.file)
-      fd.append('doc_type', 'IDENTITY')
-      fd.append('requirement_name', 'Aadhar')
-      const res = await api.ocrExtract(token, fd)
-      setNewWorker((w) => ({
-        ...w,
-        name: res.fields.name || w.name,
-        aadhar_number: (res.fields.aadhar_number || w.aadhar_number || '')
-          .replace(/\D/g, '')
-          .slice(0, 12),
-      }))
-      setAddMsg(
-        res.note
-          ? { tone: 'error', text: res.note }
-          : { tone: 'success', text: 'Read from scan — verify the name and Aadhar number.' }
-      )
-    } catch (e) {
-      setAddMsg({ tone: 'error', text: e.message })
-    } finally {
-      setAddExtracting(false)
+    if (!workers.length) {
+      setWorkerId(null)
+    } else if (!workers.some((w) => w.id === workerId)) {
+      setWorkerId(workers[0].id)
     }
-  }
+  }, [workers, workerId])
 
-  async function addWorker() {
-    const { name, aadhar_number, skill_type } = newWorker
-    if (!name.trim() || !skill_type.trim() || aadhar_number.trim().length !== 12) {
-      setAddMsg({ tone: 'error', text: 'Name, 12-digit Aadhar and skill are required.' })
-      return
-    }
-    setAddBusy(true)
-    setAddMsg(null)
-    try {
-      // 1) Create the worker.
-      const created = await api.createWorker(token, {
-        name: name.trim(),
-        aadhar_number: aadhar_number.trim(),
-        skill_type: skill_type.trim(),
-        contractor: newWorker.contractor || null,
-      })
-      // 2) If a scan was provided, verify the Aadhar document in the same flow.
-      let verified = false
-      if (newAadhaarScan?.file) {
-        try {
-          const fd = new FormData()
-          fd.append('worker', created.id)
-          fd.append('doc_type', 'IDENTITY')
-          fd.append('requirement_name', 'Aadhar')
-          fd.append('document_number', aadhar_number.trim())
-          fd.append('file', newAadhaarScan.file)
-          await api.verifyDocumentForm(token, fd)
-          verified = true
-        } catch {
-          /* worker was created; the Aadhar doc can still be added manually */
-        }
-      }
-      await loadWorkers(created.id) // add + auto-select the new worker
-      if (newAadhaarScan?.url) URL.revokeObjectURL(newAadhaarScan.url)
-      setNewAadhaarScan(null)
-      setNewWorker({ name: '', aadhar_number: '', skill_type: '', contractor: '' })
-      setShowAdd(false)
-      setMsg({
-        tone: 'success',
-        text: verified
-          ? `Added ${created.name} and verified their Aadhar document.`
-          : `Added ${created.name}. Now upload and verify their documents.`,
-      })
-    } catch (e) {
-      setAddMsg({ tone: 'error', text: e.message })
-    } finally {
-      setAddBusy(false)
-    }
-  }
-
-  // Revoke object URLs when the uploads change / unmount.
+  // Revoke object URLs when the upload changes / unmounts.
   useEffect(() => () => upload?.url && URL.revokeObjectURL(upload.url), [upload])
-  useEffect(() => () => newAadhaarScan?.url && URL.revokeObjectURL(newAadhaarScan.url), [newAadhaarScan])
 
   function selectDocType(value) {
     setDocSel(value)
@@ -269,12 +169,15 @@ export default function FieldOfficerIntakeWorkbench() {
           workers.find((w) => w.id === workerId)?.name || 'worker'
         }.`,
       })
+      onChanged?.()
     } catch (e) {
       setMsg({ tone: 'error', text: e.message })
     } finally {
       setBusy(false)
     }
   }
+
+  const selectedWorker = workers.find((w) => w.id === workerId) || null
 
   return (
     <div className="workbench">
@@ -315,113 +218,7 @@ export default function FieldOfficerIntakeWorkbench() {
             ))}
           </select>
         </label>
-
-        <button
-          className={`btn small wb-add-toggle ${showAdd ? '' : 'primary'}`}
-          onClick={() => {
-            setShowAdd((v) => !v)
-            setAddMsg(null)
-          }}
-        >
-          {showAdd ? '✕ Cancel' : '➕ New worker'}
-        </button>
       </div>
-
-      {showAdd && (
-        <div className="wb-addworker">
-          <div className="wb-pane-title">Add a new worker to the registry</div>
-
-          <div className="wb-aadhaar-intake">
-            <input
-              ref={newScanInputRef}
-              type="file"
-              accept="image/*,application/pdf"
-              hidden
-              onChange={(e) => onNewAadhaarFile(e.target.files?.[0])}
-            />
-            <button className="btn small" onClick={() => newScanInputRef.current?.click()}>
-              📷 Upload Aadhar card
-            </button>
-            {newAadhaarScan && (
-              <>
-                <button
-                  className="btn small primary"
-                  disabled={addExtracting}
-                  onClick={readNewAadhaar}
-                >
-                  {addExtracting ? 'Reading…' : '🔍 Read name & number from scan'}
-                </button>
-                <span className="muted">{newAadhaarScan.file.name}</span>
-              </>
-            )}
-            {!newAadhaarScan && (
-              <span className="muted">
-                Optional — read the worker's details off the card, then verify below.
-              </span>
-            )}
-          </div>
-
-          <div className="wb-add-grid">
-            <label className="wb-field">
-              <span>Full name</span>
-              <input
-                value={newWorker.name}
-                onChange={(e) => setNewWorker({ ...newWorker, name: e.target.value })}
-              />
-            </label>
-            <label className="wb-field">
-              <span>Aadhar number (12 digits)</span>
-              <input
-                inputMode="numeric"
-                maxLength={12}
-                value={newWorker.aadhar_number}
-                onChange={(e) =>
-                  setNewWorker({
-                    ...newWorker,
-                    aadhar_number: e.target.value.replace(/\D/g, '').slice(0, 12),
-                  })
-                }
-              />
-            </label>
-            <label className="wb-field">
-              <span>Skill type</span>
-              <input
-                placeholder="e.g. Carpenter"
-                value={newWorker.skill_type}
-                onChange={(e) => setNewWorker({ ...newWorker, skill_type: e.target.value })}
-              />
-            </label>
-            <label className="wb-field">
-              <span>Assign to contractor</span>
-              <select
-                value={newWorker.contractor}
-                onChange={(e) => setNewWorker({ ...newWorker, contractor: e.target.value })}
-              >
-                <option value="">— unassigned —</option>
-                {contractors.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.email}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <div className="wb-commit-row">
-            <button className="btn primary" disabled={addBusy} onClick={addWorker}>
-              {addBusy
-                ? 'Adding…'
-                : newAadhaarScan
-                ? 'Create worker + verify Aadhar'
-                : 'Create worker'}
-            </button>
-            {addMsg && <span className={`inline-msg ${addMsg.tone}`}>{addMsg.text}</span>}
-          </div>
-          <div className="muted">
-            With an Aadhar scan attached, creating the worker also verifies their Aadhar
-            document in one step. Skill and contractor are not on the card — set them here.
-          </div>
-        </div>
-      )}
 
       <div className="wb-split">
         {/* LEFT — document previewer (real upload or mock template) */}
@@ -519,17 +316,9 @@ export default function FieldOfficerIntakeWorkbench() {
         </div>
       </div>
 
-      <TradeTestPanel
-        token={token}
-        worker={workers.find((w) => w.id === workerId) || null}
-        onChanged={() => loadWorkers(workerId)}
-      />
+      <TradeTestPanel token={token} worker={selectedWorker} onChanged={onChanged} />
 
-      <SafetyVideoPanel
-        token={token}
-        worker={workers.find((w) => w.id === workerId) || null}
-        onChanged={() => loadWorkers(workerId)}
-      />
+      <SafetyVideoPanel token={token} worker={selectedWorker} onChanged={onChanged} />
     </div>
   )
 }
@@ -713,9 +502,8 @@ function PoliceForm({ form, setField }) {
   )
 }
 
-
 // ---------------------------------------------------------------------------
-// Trade test — Field Officer administers a 5-question practical exam on the spot.
+// Trade test — the contractor administers a 5-question practical exam on the spot.
 // ---------------------------------------------------------------------------
 function TradeTestPanel({ token, worker, onChanged }) {
   const [phase, setPhase] = useState('idle') // idle | testing | result
@@ -933,9 +721,9 @@ function TradeTestResult({ result, onRetry, busy }) {
 }
 
 // ---------------------------------------------------------------------------
-// Safety Training video — mandatory induction clip. The Field Officer plays it
-// for the selected worker (kiosk); forward-seeking is blocked; progress is
-// pushed to the backend heartbeat until it reaches 100%.
+// Safety Training video — mandatory induction clip. The contractor plays it for
+// the selected worker (kiosk); forward-seeking is blocked; progress is pushed to
+// the backend heartbeat until it reaches 100%.
 // ---------------------------------------------------------------------------
 function SafetyVideoPanel({ token, worker, onChanged }) {
   const [playing, setPlaying] = useState(false)

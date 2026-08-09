@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from django.conf import settings
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 from django.utils import timezone
@@ -51,13 +52,12 @@ class User(AbstractUser):
     class Role(models.TextChoices):
         PRINCIPAL_EMPLOYER = "PE", "Principal Employer"
         CONTRACTOR = "CONTRACTOR", "Contractor"
-        FIELD_OFFICER = "FIELD_OFFICER", "Field Officer"
         GATE_SECURITY = "GATE_SECURITY", "Gate Security"
 
     email = models.EmailField(unique=True)
     role = models.CharField(max_length=20, choices=Role.choices)
-    # Contractors and field officers belong to a vendor/company label (free text
-    # for this MVP). PE + Gate belong to the factory.
+    # Contractors belong to a vendor/company label (free text for this MVP).
+    # PE + Gate belong to the factory.
     organization = models.CharField(max_length=150, blank=True, default="")
 
     USERNAME_FIELD = "email"
@@ -275,10 +275,11 @@ class Worker(models.Model):
                     }
                 )
 
-        # Merge in the 5-pillar intake checks (medical, police, videos). These are
-        # global to the worker, not project-specific, but a failure in any of them
-        # must also block deployment — so they surface as gaps here too.
-        intake_gaps, intake_satisfied = self._intake_status(today)
+        # Merge in the intake pillar checks (medical, police, trade test, safety
+        # video, resume). These are global to the worker, not project-specific,
+        # but a failure in any of them must also block deployment — so they
+        # surface as gaps here too.
+        intake_gaps, intake_satisfied, advisories = self._intake_status(today)
         gaps.extend(intake_gaps)
         satisfied.extend(intake_satisfied)
 
@@ -287,32 +288,59 @@ class Worker(models.Model):
             "is_compliant": len(gaps) == 0,
             "satisfied": satisfied,
             "gaps": gaps,
+            # Non-blocking findings (e.g. a missing resume while
+            # REQUIRE_RESUME_FOR_COMPLIANCE is off). Surfaced to the UI but never
+            # counted against compliance.
+            "advisories": advisories,
+            "evaluated_at": timezone.now().isoformat(),
         }
 
-    def _intake_status(self, today) -> tuple[list[dict], list[dict]]:
-        """Evaluate the medical / police / video pillars for this worker.
+    def compliance_snapshot(self, project: "Project | None" = None) -> dict:
+        """Compliance with or without a project.
 
-        Returns ``(gaps, satisfied)`` where each entry is a dict tagged with
-        ``kind="intake"`` and a ``pillar`` so the UI can render an explanation
-        (these have no uploadable document slot).
+        With a project this is exactly ``compliance_against_project``. Without
+        one — e.g. the contractor's workforce-demand search before a project is
+        chosen — only the worker-global intake pillars are evaluated, since
+        document requirements are defined per project.
+        """
+        if project is not None:
+            return self.compliance_against_project(project)
+
+        today = timezone.now().date()
+        gaps, satisfied, advisories = self._intake_status(today)
+        return {
+            "worker_id": self.id,
+            "is_compliant": len(gaps) == 0,
+            "satisfied": satisfied,
+            "gaps": gaps,
+            "advisories": advisories,
+            "evaluated_at": timezone.now().isoformat(),
+        }
+
+    def _intake_status(self, today) -> tuple[list[dict], list[dict], list[dict]]:
+        """Evaluate the medical / police / trade-test / video / resume pillars.
+
+        Returns ``(gaps, satisfied, advisories)`` where each entry is a dict
+        tagged with ``kind="intake"`` and a ``pillar`` so the UI can render an
+        explanation (these have no uploadable document slot).
         """
         gaps: list[dict] = []
         satisfied: list[dict] = []
+        advisories: list[dict] = []
 
-        def add(pillar, name, ok, reason=None, detail=""):
+        def add(pillar, name, ok, reason=None, detail="", blocking=True):
             if ok:
                 satisfied.append({"pillar": pillar, "requirement_name": name})
-            else:
-                gaps.append(
-                    {
-                        "kind": "intake",
-                        "pillar": pillar,
-                        "requirement_id": None,
-                        "requirement_name": name,
-                        "reason": reason,
-                        "detail": detail,
-                    }
-                )
+                return
+            entry = {
+                "kind": "intake",
+                "pillar": pillar,
+                "requirement_id": None,
+                "requirement_name": name,
+                "reason": reason,
+                "detail": detail,
+            }
+            (gaps if blocking else advisories).append(entry)
 
         # --- Pillar 1: Medical ---
         med = self.medical_records.order_by("-exam_date").first()
@@ -369,7 +397,26 @@ class Worker(models.Model):
             add("SAFETY_VIDEO", "Safety Training Video", False, "INCOMPLETE",
                 f"Safety induction video only {pct}% watched.")
 
-        return gaps, satisfied
+        # --- Pillar 5: Resume on file (scanned + parsed candidate profile) ---
+        # Blocking only when REQUIRE_RESUME_FOR_COMPLIANCE is on; otherwise it is
+        # reported as an advisory so existing rosters stay deployable.
+        try:
+            profile = self.candidate_profile
+        except CandidateProfile.DoesNotExist:
+            profile = None
+        resume_required = getattr(settings, "REQUIRE_RESUME_FOR_COMPLIANCE", False)
+        if profile is not None and profile.resume_key:
+            add("RESUME", "Resume on file", True)
+        elif profile is not None:
+            add("RESUME", "Resume on file", False, "MISSING",
+                "A candidate profile exists but no resume document is stored.",
+                blocking=resume_required)
+        else:
+            add("RESUME", "Resume on file", False, "MISSING",
+                "No resume has been scanned for this worker.",
+                blocking=resume_required)
+
+        return gaps, satisfied, advisories
 
     @staticmethod
     def _best_document(
@@ -406,8 +453,7 @@ class Worker(models.Model):
     def is_gate_cleared(self) -> "IntakeList | None":
         """Return an Approved intake list containing this worker, if any.
 
-        Gate security grants entry only when the worker appears on at least one
-        PE-approved deployment list.
+        Approval is necessary but **not sufficient** — see ``gate_decision``.
         """
         return (
             IntakeList.objects.filter(
@@ -418,6 +464,69 @@ class Worker(models.Model):
             .order_by("-reviewed_at")
             .first()
         )
+
+    def gate_decision(self) -> dict:
+        """Real-time GREEN/RED decision for gate security.
+
+        An approved intake list is a *snapshot* taken when the Principal
+        Employer signed off. Documents keep expiring after that: a medical or
+        PVC can lapse, a Safety Training certificate can hit its expiry date, a
+        pillar can regress. Trusting the snapshot admits a worker whose papers
+        died last week.
+
+        So the gate re-runs ``compliance_against_project`` against the approved
+        list's project **at scan time** and denies entry the moment any blocking
+        gap exists — reporting the precise reason so the guard can say why.
+
+        Shape::
+
+            {"access": "GRANTED"|"DENIED", "reason_code": ..., "reason": ...,
+             "project": ..., "list_id": ..., "compliance": {...}|None}
+        """
+        approved_list = self.is_gate_cleared()
+        if approved_list is None:
+            return {
+                "access": "DENIED",
+                "reason_code": "NOT_APPROVED",
+                "reason": "Worker is not on any approved deployment list.",
+                "project": None,
+                "list_id": None,
+                "compliance": None,
+            }
+
+        compliance = self.compliance_against_project(approved_list.project)
+        if compliance["is_compliant"]:
+            return {
+                "access": "GRANTED",
+                "reason_code": "COMPLIANT",
+                "reason": "Approved for deployment and all documents are currently valid.",
+                "project": approved_list.project.name,
+                "list_id": approved_list.id,
+                "compliance": compliance,
+            }
+
+        # Expiry is the headline case the gate exists to catch — lead with it.
+        expired = [g for g in compliance["gaps"] if g.get("reason") == "EXPIRED"]
+        if expired:
+            names = ", ".join(g["requirement_name"] for g in expired)
+            return {
+                "access": "DENIED",
+                "reason_code": "DOCUMENT_EXPIRED",
+                "reason": f"Document expired since approval: {names}.",
+                "project": approved_list.project.name,
+                "list_id": approved_list.id,
+                "compliance": compliance,
+            }
+
+        names = ", ".join(g["requirement_name"] for g in compliance["gaps"])
+        return {
+            "access": "DENIED",
+            "reason_code": "COMPLIANCE_REGRESSED",
+            "reason": f"No longer compliant since approval: {names}.",
+            "project": approved_list.project.name,
+            "list_id": approved_list.id,
+            "compliance": compliance,
+        }
 
 
 class WorkerDocument(models.Model):
@@ -433,8 +542,10 @@ class WorkerDocument(models.Model):
         RequirementMaster, on_delete=models.CASCADE, related_name="documents"
     )
     document_number = models.CharField(max_length=120, blank=True, default="")
-    # We store an uploaded file, exposing its URL. file_url mirrors the DDL column
-    # and is populated from the FileField for API consumers.
+    # Object key inside the PRIVATE Supabase bucket. Never publicly reachable —
+    # the API mints a short-lived signed URL on request (see storage.py).
+    storage_key = models.CharField(max_length=500, blank=True, default="")
+    # Legacy local-media columns, retained so pre-Supabase rows keep resolving.
     document_file = models.FileField(upload_to="worker_docs/", null=True, blank=True)
     file_url = models.URLField(max_length=500, blank=True, default="")
     verification_status = models.CharField(
@@ -529,7 +640,9 @@ class IntakeMedicalRecord(models.Model):
     blood_type = models.CharField(max_length=5, blank=True, default="")
     exam_date = models.DateField()
     expiry_date = models.DateField(blank=True, null=True)
-    # The scanned document the Field Officer verified against, on the spot.
+    # The scanned document the Contractor verified against, on the spot — stored
+    # in the private Supabase bucket.
+    storage_key = models.CharField(max_length=500, blank=True, default="")
     document_file = models.FileField(upload_to="intake_docs/", null=True, blank=True)
     file_url = models.URLField(max_length=500, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -563,6 +676,7 @@ class IntakePoliceVerification(models.Model):
         choices=WorkerDocument.Status.choices,
         default=WorkerDocument.Status.VERIFIED,
     )
+    storage_key = models.CharField(max_length=500, blank=True, default="")
     document_file = models.FileField(upload_to="intake_docs/", null=True, blank=True)
     file_url = models.URLField(max_length=500, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -668,3 +782,209 @@ class SafetyTrainingProgress(models.Model):
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return f"Safety video · {self.worker.name} · {self.progress_percentage}%"
+
+
+# ---------------------------------------------------------------------------
+# Resume profiles — encrypted PII + plaintext filterable attributes
+#
+# PII STRATEGY
+# ------------
+# name / phone / email are stored ONLY as AES-256 ciphertext (BYTEA) produced by
+# pgcrypto's pgp_sym_encrypt via the app_encrypt() helper. The passphrase never
+# lives in the database — it is bound per statement from PII_ENCRYPTION_KEY.
+#
+# pgp_sym_encrypt is non-deterministic (random session key + IV), so the same
+# phone yields different ciphertext every time and a UNIQUE index on ciphertext
+# is useless. Duplicate detection therefore uses a *blind index*: a deterministic
+# HMAC-SHA256 of the normalised value, keyed by a SEPARATE pepper
+# (PII_BLIND_INDEX_KEY). Equality lookups stay O(log n); the digest is not
+# reversible without the pepper.
+#
+# Everything non-PII lives in plaintext columns so it can carry real indexes and
+# power fast multi-attribute fuzzy filtering.
+# ---------------------------------------------------------------------------
+class CandidateProfile(models.Model):
+    """Structured resume data for one worker. 1:1 with the master Worker record."""
+
+    worker = models.OneToOneField(
+        Worker, on_delete=models.CASCADE, related_name="candidate_profile"
+    )
+    # Denormalised owner so the contractor's candidate search never has to join
+    # through workers just to scope rows.
+    contractor = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="candidate_profiles",
+        limit_choices_to={"role": User.Role.CONTRACTOR},
+        null=True,
+        blank=True,
+    )
+
+    # -- PII: ciphertext only. Never add a plaintext column here. -------------
+    name_encrypted = models.BinaryField(null=True, blank=True)
+    phone_encrypted = models.BinaryField(null=True, blank=True)
+    email_encrypted = models.BinaryField(null=True, blank=True)
+    # Keyed blind indexes over the normalised values (32-byte HMAC-SHA256).
+    phone_hash = models.BinaryField(null=True, blank=True, db_index=True)
+    email_hash = models.BinaryField(null=True, blank=True, db_index=True)
+
+    # -- Non-PII: plaintext, indexed, filterable ------------------------------
+    place = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    stream = models.CharField(max_length=60, blank=True, default="", db_index=True)
+    category = models.CharField(max_length=60, blank=True, default="", db_index=True)
+    years_of_experience = models.PositiveSmallIntegerField(null=True, blank=True)
+    qualification = models.CharField(max_length=60, blank=True, default="", db_index=True)
+
+    # Private Supabase object key for the resume itself.
+    resume_key = models.CharField(max_length=500, blank=True, default="")
+    parser_provider = models.CharField(max_length=20, blank=True, default="")
+    parse_note = models.CharField(max_length=300, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "candidate_profiles"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["contractor", "category"]),
+            models.Index(fields=["contractor", "stream"]),
+            models.Index(fields=["years_of_experience"]),
+        ]
+        constraints = [
+            # A phone/email identifies one candidate *within a contractor's pool*.
+            # Scoped rather than global so two vendors can each hold a record for
+            # the same person without one blocking the other's import.
+            models.UniqueConstraint(
+                fields=["contractor", "phone_hash"],
+                name="uq_candidate_contractor_phone",
+                condition=models.Q(phone_hash__isnull=False),
+            ),
+            models.UniqueConstraint(
+                fields=["contractor", "email_hash"],
+                name="uq_candidate_contractor_email",
+                condition=models.Q(email_hash__isnull=False),
+            ),
+        ]
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return f"Candidate profile · worker#{self.worker_id}"
+
+    # -- PII accessors --------------------------------------------------------
+    # Encryption happens here so no caller ever holds a plaintext column.
+    def set_pii(self, *, name=None, phone=None, email=None) -> None:
+        """Encrypt and stamp the PII fields plus their blind indexes."""
+        from . import crypto
+
+        if name is not None:
+            self.name_encrypted = crypto.encrypt(name)
+        if phone is not None:
+            self.phone_encrypted = crypto.encrypt(phone)
+            self.phone_hash = crypto.blind_index(phone)
+        if email is not None:
+            self.email_encrypted = crypto.encrypt(email)
+            self.email_hash = crypto.blind_index(email)
+
+    @property
+    def name(self) -> str | None:
+        from . import crypto
+
+        return crypto.decrypt(self.name_encrypted)
+
+    @property
+    def phone(self) -> str | None:
+        from . import crypto
+
+        return crypto.decrypt(self.phone_encrypted)
+
+    @property
+    def email(self) -> str | None:
+        from . import crypto
+
+        return crypto.decrypt(self.email_encrypted)
+
+    def sync_name_tokens(self, name: str | None) -> None:
+        """Rebuild the searchable blind-index tokens for a name."""
+        from . import crypto
+
+        self.name_tokens.all().delete()
+        CandidateNameToken.objects.bulk_create(
+            [
+                CandidateNameToken(profile=self, token_hash=digest)
+                for digest in crypto.name_tokens(name)
+            ],
+            ignore_conflicts=True,
+        )
+
+
+class CandidateNameToken(models.Model):
+    """Searchable-encryption side table for candidate names.
+
+    Searching an encrypted ``name`` with ILIKE would have to decrypt every row,
+    which defeats live filtering. Instead we store keyed HMAC digests of each
+    name token and of its 3..12 character prefixes, so "raj" finds "Rajesh"
+    through a plain indexed equality lookup with no decryption at all.
+
+    Accepted trade-offs: prefix/whole-token matching only (no infix search), and
+    an attacker holding the database but not PII_BLIND_INDEX_KEY can tell that
+    two candidates share a name prefix without learning the name.
+    """
+
+    profile = models.ForeignKey(
+        CandidateProfile, on_delete=models.CASCADE, related_name="name_tokens"
+    )
+    token_hash = models.BinaryField()
+
+    class Meta:
+        db_table = "candidate_name_tokens"
+        indexes = [models.Index(fields=["profile"])]
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return f"name token · profile#{self.profile_id}"
+
+
+class Skill(models.Model):
+    """Canonical, de-duplicated skill vocabulary (stored lowercase). Not PII."""
+
+    name = models.CharField(max_length=80, unique=True)
+
+    class Meta:
+        db_table = "skills"
+        ordering = ["name"]
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return self.name
+
+    @classmethod
+    def normalise(cls, raw: str) -> str:
+        return " ".join((raw or "").strip().lower().split())[:80]
+
+    @classmethod
+    def get_or_create_normalised(cls, raw: str) -> "Skill | None":
+        name = cls.normalise(raw)
+        if not name:
+            return None
+        skill, _ = cls.objects.get_or_create(name=name)
+        return skill
+
+
+class CandidateSkill(models.Model):
+    """Many-to-many join between a candidate profile and the skill vocabulary."""
+
+    profile = models.ForeignKey(
+        CandidateProfile, on_delete=models.CASCADE, related_name="candidate_skills"
+    )
+    skill = models.ForeignKey(
+        Skill, on_delete=models.CASCADE, related_name="candidate_skills"
+    )
+
+    class Meta:
+        db_table = "candidate_skills"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "skill"], name="uq_candidate_skill"
+            )
+        ]
+        indexes = [models.Index(fields=["skill", "profile"])]
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return f"{self.skill.name} @ profile#{self.profile_id}"

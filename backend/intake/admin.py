@@ -1,7 +1,10 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
+from . import crypto
 from .models import (
+    CandidateProfile,
+    CandidateSkill,
     IntakeList,
     IntakeListWorker,
     IntakeMedicalRecord,
@@ -10,6 +13,7 @@ from .models import (
     ProjectRequirement,
     RequirementMaster,
     SafetyTrainingProgress,
+    Skill,
     TradeTestAttempt,
     TradeTestQuestion,
     User,
@@ -102,3 +106,42 @@ class TradeTestAttemptAdmin(admin.ModelAdmin):
 class SafetyTrainingProgressAdmin(admin.ModelAdmin):
     list_display = ("worker", "progress_percentage", "is_completed", "updated_at")
     list_filter = ("is_completed",)
+
+
+class CandidateSkillInline(admin.TabularInline):
+    model = CandidateSkill
+    extra = 0
+
+
+@admin.register(CandidateProfile)
+class CandidateProfileAdmin(admin.ModelAdmin):
+    """Resume profiles.
+
+    PII is shown **masked** — the admin is a support surface, not a data-export
+    tool, and the ciphertext columns are excluded outright so a stray page load
+    can never dump them.
+    """
+
+    list_display = ("worker", "masked_phone", "masked_email", "place", "stream",
+                    "category", "years_of_experience", "qualification")
+    list_filter = ("stream", "category", "qualification")
+    search_fields = ("place",)  # deliberately NOT name/phone/email — those are encrypted
+    readonly_fields = ("masked_phone", "masked_email", "parser_provider",
+                       "parse_note", "created_at", "updated_at")
+    exclude = ("name_encrypted", "phone_encrypted", "email_encrypted",
+               "phone_hash", "email_hash")
+    inlines = [CandidateSkillInline]
+
+    @admin.display(description="Phone")
+    def masked_phone(self, obj):
+        return crypto.mask_phone(obj.phone)
+
+    @admin.display(description="Email")
+    def masked_email(self, obj):
+        return crypto.mask_email(obj.email)
+
+
+@admin.register(Skill)
+class SkillAdmin(admin.ModelAdmin):
+    list_display = ("name",)
+    search_fields = ("name",)

@@ -1,9 +1,13 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 
-// The four hardcoded dummy personas the role-switcher toggles between. Passwords
-// live here purely for the seamless-testing masquerade requirement — this is a
-// demo affordance, not a production auth pattern.
+// The three hardcoded dummy personas the role-switcher toggles between.
+// Passwords live here purely for the seamless-testing masquerade requirement —
+// this is a demo affordance, not a production auth pattern.
+//
+// The Field Officer persona was removed: every operational capability it had
+// (intake workbench, trade tests, safety video, bulk import, verification
+// board) now belongs to the Contractor, who owns their own worker pool.
 export const PERSONAS = [
   {
     key: 'PE',
@@ -22,14 +26,6 @@ export const PERSONAS = [
     color: '#059669',
   },
   {
-    key: 'FIELD_OFFICER',
-    label: 'Field Officer',
-    email: 'field.officer@vendor.com',
-    password: 'field_test_123',
-    home: '/field-officer',
-    color: '#d97706',
-  },
-  {
     key: 'GATE_SECURITY',
     label: 'Gate Security',
     email: 'gate.security@factory.com',
@@ -39,7 +35,9 @@ export const PERSONAS = [
   },
 ]
 
-const AuthContext = createContext(null)
+// Exported so tests can provide a token directly instead of round-tripping
+// through the role-switcher's real login.
+export const AuthContext = createContext(null)
 
 export function AuthProvider({ children }) {
   // Cache one token per persona so switching is instant after the first login.
