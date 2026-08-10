@@ -1511,3 +1511,71 @@ textarea {
   font-size: 12px;
   opacity: 0.8;
 }
+
+/* --- Unified intake: per-slot document thumbnail + OCR status ------------- */
+.ui-slot {
+  flex-direction: column;
+  align-items: stretch;
+}
+.ui-slot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+}
+.ui-slot-status {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 11px;
+}
+.ui-slot-fills {
+  margin-top: 4px;
+  font-size: 12px;
+  font-style: italic;
+}
+
+/* Medium thumbnail — big enough to read a document number off, small enough
+   that six of them still fit on one screen. */
+.ui-thumb {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 200px;
+  margin-top: 12px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #f8fafc;
+  cursor: zoom-in;
+}
+.ui-thumb img,
+.ui-thumb iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  object-fit: contain;
+  display: block;
+  /* The iframe would otherwise swallow the click that opens the full view. */
+  pointer-events: none;
+}
+.ui-thumb-hint {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #fff;
+  font-size: 11px;
+}
+.ui-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ui-section-head h3 {
+  margin: 0 0 12px;
+}

@@ -61,7 +61,6 @@ urlpatterns = [
     # Gate security — real-time compliance check
     path("gate-check/", views.GateCheckView.as_view(), name="gate-check"),
     # Contractor Intake Workbench (5 pillars)
-    path("intake/mock-ocr/", views.MockOcrView.as_view(), name="mock-ocr"),
     path(
         "intake/verify-document/",
         views.VerifyDocumentView.as_view(),

@@ -30,13 +30,6 @@ const DOC_TYPES = [
   { value: 'POLICE:', label: 'Police Verification (PVC)', formType: 'POLICE' },
 ]
 
-// Testing menu — autofills the form with simulated OCR for the matching type.
-const SAMPLES = [
-  { key: 'aadhar_clean', label: 'Sample Clean Aadhar Card', doc: 'IDENTITY:Aadhar' },
-  { key: 'medical_expired', label: 'Sample Expired Medical Form', doc: 'MEDICAL:' },
-  { key: 'pvc_valid', label: 'Sample Valid PVC', doc: 'POLICE:' },
-]
-
 const OPTION_KEYS = ['A', 'B', 'C', 'D']
 
 // Sample safety induction clip. Swap for a self-hosted asset in production;
@@ -59,7 +52,6 @@ export default function IntakeWorkbench({ workers = [], onChanged }) {
   const [workerId, setWorkerId] = useState(null)
   const [docSel, setDocSel] = useState('') // one of DOC_TYPES[].value
   const [form, setForm] = useState({})
-  const [sampleTemplate, setSampleTemplate] = useState(null) // mock left-pane preview
   const [upload, setUpload] = useState(null) // { file, url, kind }
   const [busy, setBusy] = useState(false)
   const [extracting, setExtracting] = useState(false)
@@ -84,23 +76,7 @@ export default function IntakeWorkbench({ workers = [], onChanged }) {
   function selectDocType(value) {
     setDocSel(value)
     setForm({})
-    setSampleTemplate(null)
     setMsg(null)
-  }
-
-  // Load simulated OCR into the form for on-screen testing (no physical doc).
-  async function loadSample(key) {
-    setMsg(null)
-    if (!key) return
-    const s = SAMPLES.find((x) => x.key === key)
-    try {
-      const data = await api.mockOcr(token, key)
-      setDocSel(s.doc)
-      setForm({ ...data.fields })
-      setSampleTemplate({ form_type: data.form_type, fields: data.fields })
-    } catch (e) {
-      setMsg({ tone: 'error', text: e.message })
-    }
   }
 
   function onFile(f) {
@@ -129,7 +105,6 @@ export default function IntakeWorkbench({ workers = [], onChanged }) {
       if (formType === 'IDENTITY') fd.append('requirement_name', current.requirement)
       const res = await api.ocrExtract(token, fd)
       setForm((f) => ({ ...f, ...res.fields }))
-      setSampleTemplate(null)
       setMsg(
         res.note
           ? { tone: 'error', text: res.note }
@@ -190,7 +165,7 @@ export default function IntakeWorkbench({ workers = [], onChanged }) {
 
   return (
     <div className="workbench">
-      {/* Top controls: worker + document type + test autofill */}
+      {/* Top controls: which worker, which document */}
       <div className="wb-controls">
         <label>
           Worker:&nbsp;
@@ -215,22 +190,10 @@ export default function IntakeWorkbench({ workers = [], onChanged }) {
             ))}
           </select>
         </label>
-
-        <label className="wb-sample">
-          🧪 Test autofill:&nbsp;
-          <select value="" onChange={(e) => loadSample(e.target.value)}>
-            <option value="">— mock sample —</option>
-            {SAMPLES.map((s) => (
-              <option key={s.key} value={s.key}>
-                {s.label}
-              </option>
-            ))}
-          </select>
-        </label>
       </div>
 
       <div className="wb-split">
-        {/* LEFT — document previewer (real upload or mock template) */}
+        {/* LEFT — document previewer */}
         <div className="wb-pane wb-preview">
           <div className="wb-pane-title">Document Previewer</div>
 
@@ -280,11 +243,9 @@ export default function IntakeWorkbench({ workers = [], onChanged }) {
 
           {upload ? (
             <UploadedPreview upload={upload} />
-          ) : sampleTemplate ? (
-            <DocumentPreview template={sampleTemplate} />
           ) : (
             <div className="wb-empty">
-              Upload the worker's physical document, or load a mock sample to test.
+              Upload the worker's physical document to preview it here.
             </div>
           )}
         </div>
@@ -354,56 +315,6 @@ function UploadedPreview({ upload }) {
   }
   return <div className="wb-empty">Attached: {upload.file.name}</div>
 }
-
-function DocumentPreview({ template }) {
-  const f = template.fields
-  if (template.form_type === 'IDENTITY') {
-    return (
-      <div className="doc-card doc-aadhar">
-        <div className="doc-aadhar-head">Government of India · Aadhaar</div>
-        <div className="doc-aadhar-body">
-          <div className="doc-photo">🧑</div>
-          <div>
-            <div className="doc-name">{f.name}</div>
-            <div>DOB: {f.dob}</div>
-            <div>Gender: {f.gender}</div>
-            <div className="doc-aadhar-num">{f.aadhar_number}</div>
-            <div className="doc-addr">{f.address}</div>
-          </div>
-        </div>
-      </div>
-    )
-  }
-  if (template.form_type === 'MEDICAL') {
-    return (
-      <div className="doc-card doc-medical">
-        <div className="doc-medical-head">MEDICAL FITNESS CERTIFICATE</div>
-        <Line k="Exam date" v={f.exam_date} />
-        <Line k="Vision" v={f.vision} />
-        <Line k="Colour blindness" v={f.color_blindness ? 'DETECTED' : 'None'} />
-        <Line k="Vertigo" v={f.vertigo ? 'DETECTED' : 'None'} />
-        <Line k="Blood type" v={f.blood_type} />
-        <div className="doc-stamp">SCANNED</div>
-      </div>
-    )
-  }
-  return (
-    <div className="doc-card doc-police">
-      <div className="doc-police-head">POLICE VERIFICATION CERTIFICATE</div>
-      <Line k="Certificate #" v={f.certificate_number} />
-      <Line k="Issue date" v={f.issue_date} />
-      <Line k="Status" v={f.verification_status} />
-      <div className="doc-stamp police">VERIFIED</div>
-    </div>
-  )
-}
-
-const Line = ({ k, v }) => (
-  <div className="doc-line">
-    <span className="doc-k">{k}</span>
-    <span className="doc-v">{String(v)}</span>
-  </div>
-)
 
 // ---------------------------------------------------------------------------
 // Right-pane editable forms

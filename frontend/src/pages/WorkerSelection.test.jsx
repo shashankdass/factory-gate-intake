@@ -18,7 +18,6 @@ vi.mock('../api', () => ({
     updateList: vi.fn(),
     verifyDocumentForm: vi.fn(),
     deleteWorker: vi.fn(),
-    mockOcr: vi.fn(),
     ocrExtract: vi.fn(),
     tradeTestStart: vi.fn(),
     tradeTestSubmit: vi.fn(),
@@ -184,7 +183,7 @@ describe('WorkerSelection (Contractor Suite)', () => {
 
     await user.click(screen.getByRole('button', { name: /new worker intake/i }))
 
-    expect(await screen.findByText(/onboard a worker and all six documents/i)).toBeInTheDocument()
+    expect(await screen.findByText(/attach the documents first/i)).toBeInTheDocument()
   })
 
   it('renders the intake workbench with the contractor pool loaded', async () => {

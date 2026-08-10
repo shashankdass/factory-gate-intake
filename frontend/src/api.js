@@ -85,8 +85,6 @@ export const api = {
     request(`/gate-check/?aadhar=${encodeURIComponent(aadhar)}`, { token }),
 
   // Verification & Testing (single-document re-verify, 5 pillars)
-  mockOcr: (token, sample) =>
-    request(`/intake/mock-ocr/?sample=${encodeURIComponent(sample)}`, { token }),
   verifyDocument: (token, body) =>
     request('/intake/verify-document/', { method: 'POST', body, token }),
   // Multipart variant — carries the uploaded scan alongside the form fields.

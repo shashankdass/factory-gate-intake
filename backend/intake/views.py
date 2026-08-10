@@ -1133,69 +1133,6 @@ class GateCheckView(APIView):
 # ---------------------------------------------------------------------------
 # Contractor Intake Workbench — mock OCR, strict verification, video heartbeat
 # ---------------------------------------------------------------------------
-class MockOcrView(APIView):
-    """
-    GET /api/intake/mock-ocr/?sample=<key>   (Contractor)
-
-    Simulates an OCR engine so the workbench can be exercised without a physical
-    document. Dates are computed relative to *today* so the samples stay
-    meaningful over time (the "expired" sample is always ~400 days old).
-    """
-
-    def get(self, request):
-        denied = _require_role(request, User.Role.CONTRACTOR)
-        if denied:
-            return denied
-
-        today = timezone.now().date()
-        sample = (request.query_params.get("sample") or "aadhar_clean").strip()
-
-        samples = {
-            "aadhar_clean": {
-                "form_type": "IDENTITY",
-                "label": "Clean Aadhar Card",
-                "requirement_name": "Aadhar",
-                "fields": {
-                    "name": "Ravi Kumar",
-                    "aadhar_number": "100000000001",
-                    "dob": "1990-05-14",
-                    "gender": "Male",
-                    "address": "12, Industrial Area, Pune",
-                },
-            },
-            "medical_expired": {
-                "form_type": "MEDICAL",
-                "label": "Expired Medical Form",
-                "requirement_name": "Medical Exam",
-                "fields": {
-                    "exam_date": _iso(today - timedelta(days=400)),  # already expired
-                    "color_blindness": False,
-                    "vision": "6/9",
-                    "vertigo": False,
-                    "blood_type": "B+",
-                },
-            },
-            "pvc_valid": {
-                "form_type": "POLICE",
-                "label": "Valid Police Verification (PVC)",
-                "requirement_name": "Police Verification",
-                "fields": {
-                    "certificate_number": "PVC-2026-8842",
-                    "issue_date": _iso(today - timedelta(days=30)),  # valid
-                    "verification_status": "Verified",
-                },
-            },
-        }
-
-        data = samples.get(sample)
-        if data is None:
-            return Response(
-                {"detail": f"Unknown sample '{sample}'.", "available": list(samples)},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        return Response({"sample": sample, **data})
-
-
 def _check_not_expired(date_str, field_label, today):
     """Return ``(date, error_response)``. Rejects dates more than a year old.
 

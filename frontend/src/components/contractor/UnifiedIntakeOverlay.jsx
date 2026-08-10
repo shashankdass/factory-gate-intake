@@ -4,15 +4,59 @@ import { useAuth } from '../../context/AuthContext.jsx'
 import { useExpiryCheck } from './IntakeWorkbench.jsx'
 
 // One screen, one submission: all five validation pillars plus the resume.
-// Everything is uploaded to the private bucket concurrently by the backend, so
-// six documents cost about as much wall-clock as the slowest single file.
+//
+// Documents come FIRST and each is OCR'd the moment it is attached, so the
+// fields below arrive pre-filled and the contractor verifies rather than
+// transcribes. Everything stays editable — OCR is a first draft, never the final
+// word, which is why nothing is committed until Submit.
+//
+// `read` says what each document can populate:
+//   IDENTITY / MEDICAL / POLICE -> /intake/ocr-extract/
+//   resume                      -> /resume/parse/ (preview only, not persisted)
+// The safety certificate carries no reliably parseable expiry, so it stays manual.
 const SLOTS = [
-  { key: 'aadhaar_file', label: 'Aadhaar card', hint: 'Identity — required for gate entry' },
-  { key: 'pan_file', label: 'PAN card', hint: 'Identity' },
-  { key: 'safety_file', label: 'Safety Training certificate', hint: 'Expires — set the date' },
-  { key: 'medical_file', label: 'Medical fitness report', hint: 'Valid 1 year from exam date' },
-  { key: 'pvc_file', label: 'Police verification (PVC)', hint: 'Valid 1 year from issue date' },
-  { key: 'resume_file', label: 'Resume / CV', hint: 'Parsed into a searchable profile' },
+  {
+    key: 'aadhaar_file',
+    label: 'Aadhaar card',
+    hint: 'Identity — required for gate entry',
+    fills: 'name + Aadhaar number',
+    read: { kind: 'ocr', docType: 'IDENTITY', requirement: 'Aadhar' },
+  },
+  {
+    key: 'pan_file',
+    label: 'PAN card',
+    hint: 'Identity',
+    fills: 'PAN number',
+    read: { kind: 'ocr', docType: 'IDENTITY', requirement: 'PAN' },
+  },
+  {
+    key: 'safety_file',
+    label: 'Safety Training certificate',
+    hint: 'Expires — set the date yourself',
+    fills: null,
+    read: null,
+  },
+  {
+    key: 'medical_file',
+    label: 'Medical fitness report',
+    hint: 'Valid 1 year from exam date',
+    fills: 'exam date, vision, blood type, flags',
+    read: { kind: 'ocr', docType: 'MEDICAL' },
+  },
+  {
+    key: 'pvc_file',
+    label: 'Police verification (PVC)',
+    hint: 'Valid 1 year from issue date',
+    fills: 'certificate number + issue date',
+    read: { kind: 'ocr', docType: 'POLICE' },
+  },
+  {
+    key: 'resume_file',
+    label: 'Resume / CV',
+    hint: 'Parsed into a searchable profile',
+    fills: 'name and trade',
+    read: { kind: 'resume' },
+  },
 ]
 
 const EMPTY = {
@@ -30,12 +74,48 @@ const EMPTY = {
   issue_date: '',
 }
 
+/** Map one OCR / resume payload onto the form's field names. */
+export function toFormPatch(slotKey, fields) {
+  const f = fields || {}
+  switch (slotKey) {
+    case 'aadhaar_file':
+      return {
+        name: f.name || '',
+        aadhar_number: String(f.aadhar_number || '').replace(/\D/g, '').slice(0, 12),
+      }
+    case 'pan_file':
+      return { pan_number: String(f.document_number || f.aadhar_number || '').toUpperCase() }
+    case 'medical_file':
+      return {
+        exam_date: f.exam_date || '',
+        vision: f.vision || '',
+        blood_type: f.blood_type || '',
+        color_blindness: !!f.color_blindness,
+        vertigo: !!f.vertigo,
+      }
+    case 'pvc_file':
+      return {
+        certificate_number: f.certificate_number || '',
+        issue_date: f.issue_date || '',
+      }
+    case 'resume_file':
+      // The first parsed skill is a reasonable guess at the trade.
+      return { name: f.name || '', skill_type: (f.skills && f.skills[0]) || '' }
+    default:
+      return {}
+  }
+}
+
 export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
   const { token } = useAuth()
   const [form, setForm] = useState(EMPTY)
   const [files, setFiles] = useState({})
+  const [reading, setReading] = useState({}) // { slotKey: 'reading'|'done'|'none'|'error' }
+  // Object URLs for the attached files, so each slot can show a thumbnail to
+  // check the OCR against. Revoked whenever a file is replaced or the overlay
+  // closes — leaking these pins the whole file in memory.
+  const [previews, setPreviews] = useState({}) // { slotKey: {url, kind} }
   const [busy, setBusy] = useState(false)
-  const [scanning, setScanning] = useState(false)
   const [resumePreview, setResumePreview] = useState(null)
   const [error, setError] = useState(null)
   const [done, setDone] = useState(null)
@@ -56,11 +136,23 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
     if (!open) {
       setForm(EMPTY)
       setFiles({})
+      setReading({})
+      setPreviews((p) => {
+        Object.values(p).forEach((v) => v?.url && URL.revokeObjectURL(v.url))
+        return {}
+      })
       setResumePreview(null)
       setError(null)
       setDone(null)
     }
   }, [open])
+
+  // Last line of defence against leaking object URLs if the overlay unmounts
+  // while still open.
+  useEffect(
+    () => () => Object.values(previews).forEach((v) => v?.url && URL.revokeObjectURL(v.url)),
+    [previews]
+  )
 
   // Live 365-day checks, so an expired document is caught before submitting
   // rather than bounced back by the server.
@@ -69,28 +161,91 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
 
   if (!open) return null
 
-  function pick(key, file) {
-    setFiles((f) => ({ ...f, [key]: file || undefined }))
-    setError(null)
+  function withFile(field, file) {
+    const fd = new FormData()
+    fd.append(field, file)
+    return fd
   }
 
-  // Read the resume before committing, so the contractor can sanity-check what
-  // was extracted (and fix the worker's name from it) before anything is saved.
-  async function scanResume() {
-    if (!files.resume_file) return
-    setScanning(true)
-    setError(null)
+  /** Only fill blanks — never clobber something the contractor already typed. */
+  function mergeBlanks(patch) {
+    setForm((prev) => {
+      const next = { ...prev }
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === '' || value == null) continue
+        const current = prev[key]
+        if (typeof current === 'boolean' ? current === false : !current) {
+          next[key] = value
+        }
+      }
+      return next
+    })
+  }
+
+  /** OCR one attached document and merge whatever it yields. */
+  async function readSlot(slot, file) {
+    if (!slot.read || !file) return
+    setReading((r) => ({ ...r, [slot.key]: 'reading' }))
     try {
-      const fd = new FormData()
-      fd.append('resume', files.resume_file)
-      const res = await api.parseResume(token, fd)
-      setResumePreview(res)
-      if (res.name && !form.name) set('name', res.name)
-    } catch (e) {
-      setError(e.message)
-    } finally {
-      setScanning(false)
+      let fields
+      if (slot.read.kind === 'resume') {
+        const res = await api.parseResume(token, withFile('resume', file))
+        setResumePreview(res)
+        fields = res
+      } else {
+        const fd = withFile('file', file)
+        fd.append('doc_type', slot.read.docType)
+        if (slot.read.requirement) fd.append('requirement_name', slot.read.requirement)
+        const res = await api.ocrExtract(token, fd)
+        fields = res.fields
+      }
+      const patch = toFormPatch(slot.key, fields)
+      const anything = Object.values(patch).some((v) => v !== '' && v !== false && v != null)
+      mergeBlanks(patch)
+      setReading((r) => ({ ...r, [slot.key]: anything ? 'done' : 'none' }))
+    } catch {
+      // A failed read is never fatal — those fields are simply typed by hand.
+      setReading((r) => ({ ...r, [slot.key]: 'error' }))
     }
+  }
+
+  function pick(slot, file) {
+    setFiles((f) => ({ ...f, [slot.key]: file || undefined }))
+    setError(null)
+
+    // Swap the thumbnail, releasing whatever was there before.
+    setPreviews((prev) => {
+      prev[slot.key]?.url && URL.revokeObjectURL(prev[slot.key].url)
+      const next = { ...prev }
+      if (!file) {
+        delete next[slot.key]
+      } else {
+        next[slot.key] = {
+          url: URL.createObjectURL(file),
+          kind: file.type.startsWith('image/')
+            ? 'image'
+            : file.type === 'application/pdf'
+            ? 'pdf'
+            : 'other',
+          name: file.name,
+        }
+      }
+      return next
+    })
+
+    if (!file) {
+      setReading((r) => ({ ...r, [slot.key]: undefined }))
+      if (slot.key === 'resume_file') setResumePreview(null)
+      return
+    }
+    readSlot(slot, file)
+  }
+
+  /** Re-run every attached document (after swapping files, or on demand). */
+  async function readAll() {
+    await Promise.all(
+      SLOTS.filter((s) => s.read && files[s.key]).map((s) => readSlot(s, files[s.key]))
+    )
   }
 
   async function submit() {
@@ -118,6 +273,7 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
   const identityReady =
     form.name.trim() && form.skill_type.trim() && form.aadhar_number.length === 12
   const attached = Object.values(files).filter(Boolean).length
+  const anyReading = Object.values(reading).some((s) => s === 'reading')
 
   return (
     <div className="ui-overlay" role="dialog" aria-modal="true" aria-label="Unified worker intake">
@@ -126,8 +282,8 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
           <div>
             <h2>Unified Worker Intake</h2>
             <p className="muted">
-              Onboard a worker and all six documents in a single pass — Aadhaar, PAN,
-              Safety certificate, Medical, Police verification and Resume.
+              Attach the documents first — each is read automatically and fills in the
+              fields below. Check what it found, correct anything wrong, then submit once.
             </p>
           </div>
           <button className="btn ghost" onClick={onClose} disabled={busy}>
@@ -139,9 +295,33 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
           <IntakeResult result={done} onClose={onClose} />
         ) : (
           <div className="ui-body">
-            {/* --- Worker identity --- */}
+            {/* --- 1. Documents, read on attach --- */}
             <section className="ui-section">
-              <h3>1 · Worker</h3>
+              <div className="ui-section-head">
+                <h3>1 · Documents</h3>
+                {attached > 0 && (
+                  <button className="btn small ghost" onClick={readAll} disabled={anyReading}>
+                    {anyReading ? 'Reading…' : '↻ Re-read all'}
+                  </button>
+                )}
+              </div>
+              <div className="ui-slots">
+                {SLOTS.map((slot) => (
+                  <FileSlot
+                    key={slot.key}
+                    slot={slot}
+                    file={files[slot.key]}
+                    status={reading[slot.key]}
+                    preview={previews[slot.key]}
+                    onPick={(f) => pick(slot, f)}
+                  />
+                ))}
+              </div>
+            </section>
+
+            {/* --- 2. Worker identity, prefilled from the Aadhaar / resume --- */}
+            <section className="ui-section">
+              <h3>2 · Worker</h3>
               <div className="ui-grid">
                 <label className="wb-field">
                   <span>Full name</span>
@@ -169,22 +349,7 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
               </div>
             </section>
 
-            {/* --- Documents --- */}
-            <section className="ui-section">
-              <h3>2 · Documents</h3>
-              <div className="ui-slots">
-                {SLOTS.map((slot) => (
-                  <FileSlot
-                    key={slot.key}
-                    slot={slot}
-                    file={files[slot.key]}
-                    onPick={(f) => pick(slot.key, f)}
-                  />
-                ))}
-              </div>
-            </section>
-
-            {/* --- Document details --- */}
+            {/* --- 3. Document details, prefilled per document --- */}
             <section className="ui-section">
               <h3>3 · Details</h3>
               <div className="ui-grid">
@@ -284,24 +449,13 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
               </div>
             </section>
 
-            {/* --- Resume --- */}
-            <section className="ui-section">
-              <h3>4 · Resume</h3>
-              <div className="row gap">
-                <button
-                  className="btn small"
-                  disabled={!files.resume_file || scanning}
-                  onClick={scanResume}
-                >
-                  {scanning ? 'Reading…' : '🔍 Scan resume before saving'}
-                </button>
-                <span className="muted">
-                  Name, phone and email are encrypted at rest; skills and experience stay
-                  searchable.
-                </span>
-              </div>
-              {resumePreview && <ResumePreview data={resumePreview} />}
-            </section>
+            {/* --- 4. Resume, parsed on attach --- */}
+            {resumePreview && (
+              <section className="ui-section">
+                <h3>4 · Resume profile</h3>
+                <ResumePreview data={resumePreview} />
+              </section>
+            )}
 
             {error && <div className="alert error">⚠ {error}</div>}
           </div>
@@ -311,6 +465,7 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
           <footer className="ui-foot">
             <span className="muted">
               {attached} of {SLOTS.length} documents attached
+              {anyReading ? ' · reading…' : ''}
             </span>
             <div className="row gap">
               <button className="btn ghost" onClick={onClose} disabled={busy}>
@@ -331,8 +486,16 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
   )
 }
 
-function FileSlot({ slot, file, onPick }) {
+const STATUS_LABEL = {
+  reading: { text: '⏳ reading…', tone: 'amber' },
+  done: { text: '✅ read', tone: 'green' },
+  none: { text: '— nothing readable', tone: 'grey' },
+  error: { text: '⚠ could not read', tone: 'amber' },
+}
+
+function FileSlot({ slot, file, status, preview, onPick }) {
   const inputRef = useRef(null)
+  const badge = status ? STATUS_LABEL[status] : null
   return (
     <div className={`ui-slot ${file ? 'filled' : ''}`}>
       <input
@@ -342,17 +505,46 @@ function FileSlot({ slot, file, onPick }) {
         hidden
         onChange={(e) => onPick(e.target.files?.[0])}
       />
-      <div className="ui-slot-main">
-        <div className="ui-slot-label">{slot.label}</div>
-        <div className="muted">{file ? file.name : slot.hint}</div>
+
+      <div className="ui-slot-row">
+        <div className="ui-slot-main">
+          <div className="ui-slot-label">{slot.label}</div>
+          <div className="muted">{file ? file.name : slot.hint}</div>
+          {file && badge && (
+            <span className={`badge ${badge.tone} ui-slot-status`}>{badge.text}</span>
+          )}
+          {!file && slot.fills && (
+            <div className="muted ui-slot-fills">auto-fills {slot.fills}</div>
+          )}
+        </div>
+        {file ? (
+          <button className="btn small ghost" onClick={() => onPick(null)}>
+            Remove
+          </button>
+        ) : (
+          <button className="btn small" onClick={() => inputRef.current?.click()}>
+            Attach
+          </button>
+        )}
       </div>
-      {file ? (
-        <button className="btn small ghost" onClick={() => onPick(null)}>
-          Remove
-        </button>
-      ) : (
-        <button className="btn small" onClick={() => inputRef.current?.click()}>
-          Attach
+
+      {/* Thumbnail so the extracted values can be checked against the document
+          itself. Click to open it full size in a new tab. */}
+      {preview && (
+        <button
+          type="button"
+          className="ui-thumb"
+          onClick={() => window.open(preview.url, '_blank', 'noopener')}
+          title="Open full size"
+        >
+          {preview.kind === 'image' ? (
+            <img src={preview.url} alt={`${slot.label} preview`} />
+          ) : preview.kind === 'pdf' ? (
+            <iframe title={`${slot.label} preview`} src={preview.url} />
+          ) : (
+            <span className="muted">No preview for this file type</span>
+          )}
+          <span className="ui-thumb-hint">Click to enlarge</span>
         </button>
       )}
     </div>
@@ -390,7 +582,10 @@ function ResumePreview({ data }) {
           ))}
         </div>
       )}
-      <div className="muted">Read via {data.provider}. Nothing is saved until you submit.</div>
+      <div className="muted">
+        Read via {data.provider}. Name, phone and email are encrypted when saved;
+        nothing is stored until you submit.
+      </div>
     </div>
   )
 }
@@ -425,7 +620,7 @@ function IntakeResult({ result, onClose }) {
             ))}
           </ul>
           <div className="muted">
-            Finish these in Verification & Testing — the worker is already in your pool.
+            Finish these in Verification &amp; Testing — the worker is already in your pool.
           </div>
         </div>
       )}
