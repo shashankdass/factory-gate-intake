@@ -27,7 +27,7 @@ only scans.
 
 | Persona | Does | Dashboard |
 |---|---|---|
-| **Contractor** | Owns their worker pool. Enters workforce demand ("3 Carpenters, 4 Masons") and searches their own pool, runs the split-pane intake workbench, administers pictorial trade tests, tracks safety-video progress, bulk-imports via CSV/Excel, onboards workers with all six documents in one pass, and submits deployment lists | `/contractor` |
+| **Contractor** | Owns their worker pool. Enters workforce demand ("3 Carpenters, 4 Masons") and searches their own pool, onboards workers with all six documents in one pass via the Unified Intake overlay, administers pictorial trade tests, tracks safety-video progress, re-verifies individual documents, and submits deployment lists | `/contractor` |
 | **Principal Employer (PE)** | Reviews submitted lists and approves / requests changes / rejects with comments. Nothing else — project and requirement configuration were removed from this view | `/employer` |
 | **Gate Security** | Fast Aadhaar lookup → **real-time** GREEN/RED entry decision | `/gate` |
 
@@ -174,7 +174,7 @@ unified intake, workforce demand, and the storage presign contract.
 | GET/POST | `/api/workers/` | Contractor | own worker registry |
 | DELETE | `/api/workers/<id>/` | Contractor | remove worker + their stored files |
 | GET | `/api/verification-status/` | Contractor | whole-pool verification matrix |
-| POST | `/api/workers/bulk-upload/` | Contractor | CSV/Excel import |
+| POST | `/api/workers/bulk-upload/` | Contractor | CSV/Excel import (API only — no UI) |
 | POST | `/api/intake/onboard-worker/` | Contractor | unified 6-document intake |
 | POST | `/api/intake/verify-document/` | Contractor | commit one verified document |
 | POST | `/api/intake/ocr-extract/` | Contractor | OCR a scan into form fields |

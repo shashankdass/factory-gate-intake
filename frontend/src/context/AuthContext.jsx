@@ -6,8 +6,8 @@ import { api } from '../api'
 // this is a demo affordance, not a production auth pattern.
 //
 // The Field Officer persona was removed: every operational capability it had
-// (intake workbench, trade tests, safety video, bulk import, verification
-// board) now belongs to the Contractor, who owns their own worker pool.
+// (intake workbench, trade tests, safety video, verification board) now belongs
+// to the Contractor, who owns their own worker pool.
 export const PERSONAS = [
   {
     key: 'PE',

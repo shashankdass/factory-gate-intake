@@ -65,7 +65,6 @@ export const api = {
   deleteWorker: (token, id) =>
     request(`/workers/${id}/`, { method: 'DELETE', token }),
   verificationStatus: (token) => request('/verification-status/', { token }),
-  bulkUpload: (token, formData) => form('/workers/bulk-upload/', formData, token),
 
   // Documents (inline gap-fix upload)
   uploadDocument: (token, formData) => form('/documents/upload/', formData, token),
@@ -85,7 +84,7 @@ export const api = {
   gateCheck: (token, aadhar) =>
     request(`/gate-check/?aadhar=${encodeURIComponent(aadhar)}`, { token }),
 
-  // Contractor Intake Workbench (5 pillars)
+  // Verification & Testing (single-document re-verify, 5 pillars)
   mockOcr: (token, sample) =>
     request(`/intake/mock-ocr/?sample=${encodeURIComponent(sample)}`, { token }),
   verifyDocument: (token, body) =>

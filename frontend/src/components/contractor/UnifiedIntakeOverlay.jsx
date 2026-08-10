@@ -425,7 +425,7 @@ function IntakeResult({ result, onClose }) {
             ))}
           </ul>
           <div className="muted">
-            Finish these in the Intake Workbench — the worker is already in your pool.
+            Finish these in Verification & Testing — the worker is already in your pool.
           </div>
         </div>
       )}

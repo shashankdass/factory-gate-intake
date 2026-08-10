@@ -18,7 +18,6 @@ vi.mock('../api', () => ({
     updateList: vi.fn(),
     verifyDocumentForm: vi.fn(),
     deleteWorker: vi.fn(),
-    bulkUpload: vi.fn(),
     mockOcr: vi.fn(),
     ocrExtract: vi.fn(),
     tradeTestStart: vi.fn(),
@@ -116,9 +115,8 @@ describe('WorkerSelection (Contractor Suite)', () => {
     for (const label of [
       /workforce demand/i,
       /worker pool/i,
-      /intake workbench/i,
+      /verification & testing/i,
       /verification status/i,
-      /bulk import/i,
     ]) {
       expect(screen.getByRole('button', { name: label })).toBeInTheDocument()
     }
@@ -177,7 +175,7 @@ describe('WorkerSelection (Contractor Suite)', () => {
     // appears as a requirement-filter checkbox above the grid.
     expect(await screen.findByText('PAN', { selector: '.gap-name' })).toBeInTheDocument()
     // Pillar gap: pointer to the workbench, no upload control.
-    expect(screen.getByText(/resolve this in the intake workbench tab/i)).toBeInTheDocument()
+    expect(screen.getByText(/resolve this in the verification & testing tab/i)).toBeInTheDocument()
   })
 
   it('opens the unified intake overlay', async () => {
@@ -193,7 +191,7 @@ describe('WorkerSelection (Contractor Suite)', () => {
     const user = userEvent.setup()
     renderWithAuth(<WorkerSelection />)
 
-    await user.click(screen.getByRole('button', { name: /intake workbench/i }))
+    await user.click(screen.getByRole('button', { name: /verification & testing/i }))
 
     expect(await screen.findByText(/document previewer/i)).toBeInTheDocument()
     expect(screen.getByText(/confirm & verify values/i)).toBeInTheDocument()

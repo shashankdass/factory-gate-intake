@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext.jsx'
-import BulkImport from '../components/contractor/BulkImport.jsx'
 import IntakeWorkbench from '../components/contractor/IntakeWorkbench.jsx'
 import UnifiedIntakeOverlay from '../components/contractor/UnifiedIntakeOverlay.jsx'
 import VerificationStatusTable from '../components/contractor/VerificationStatusTable.jsx'
@@ -20,14 +19,16 @@ const REASON_LABEL = {
 const TABS = [
   { key: 'demand', label: '🔎 Workforce Demand' },
   { key: 'pool', label: '👷 Worker Pool' },
-  { key: 'workbench', label: '🧾 Intake Workbench' },
+  // Not an add-worker screen — that is the "New Worker Intake" overlay. This tab
+  // is for an existing worker: administer the trade test, play the safety video,
+  // and re-verify a single document.
+  { key: 'workbench', label: '🧾 Verification & Testing' },
   { key: 'status', label: '✅ Verification Status' },
-  { key: 'bulk', label: '📤 Bulk Import' },
 ]
 
 // The Contractor Suite. Everything operational lives here now: the worker pool
 // they own, the split-pane intake workbench, trade tests, safety-video tracking,
-// bulk import, resume-backed skill search, and the unified onboarding overlay.
+// resume-backed skill search, and the unified onboarding overlay.
 export default function WorkerSelection() {
   const { token } = useAuth()
   const [tab, setTab] = useState('demand')
@@ -242,8 +243,6 @@ export default function WorkerSelection() {
       )}
 
       {tab === 'status' && <VerificationStatusTable onChanged={refreshAll} />}
-
-      {tab === 'bulk' && <BulkImport onImported={refreshAll} />}
 
       {tab === 'pool' && (
         <>
@@ -548,7 +547,7 @@ function GapRow({ workerId, gap, token, onSaved }) {
   const [err, setErr] = useState(null)
 
   // Intake pillars (medical / police / trade test / video / resume) have no
-  // uploadable slot here — they are resolved in the Intake Workbench tab.
+  // uploadable slot here — they are resolved in the Verification & Testing tab.
   if (gap.kind === 'intake') {
     return (
       <li className="gap-row intake">
@@ -559,7 +558,7 @@ function GapRow({ workerId, gap, token, onSaved }) {
           </span>
         </div>
         <div className="reject-reason">{gap.detail}</div>
-        <div className="muted intake-hint">Resolve this in the Intake Workbench tab.</div>
+        <div className="muted intake-hint">Resolve this in the Verification & Testing tab.</div>
       </li>
     )
   }

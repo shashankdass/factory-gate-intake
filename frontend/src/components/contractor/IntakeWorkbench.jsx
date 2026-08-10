@@ -2,11 +2,20 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext.jsx'
 
-// What the contractor can process one document at a time. Identity docs map to a
-// WorkerDocument requirement; Medical/Police map to their structured
-// 1-year-validity records. Onboarding a *new* worker with all six documents at
-// once is the Unified Intake overlay's job — this pane is for fixing or
-// re-verifying a single document on an existing worker.
+// Verification & Testing — everything that happens to a worker who already
+// exists. Onboarding a *new* worker with all six documents at once is the
+// Unified Intake overlay's job; this surface covers the three things the overlay
+// cannot do:
+//
+//   1. re-verify or replace a single document (the split pane below),
+//   2. administer the Trade Test,
+//   3. play the Safety Training video and record watch progress.
+//
+// (2) and (3) are compliance pillars in their own right and have no other UI, so
+// without this tab no worker could ever become deployable.
+//
+// Identity docs map to a WorkerDocument requirement; Medical/Police map to their
+// structured 1-year-validity records.
 const DOC_TYPES = [
   { value: 'IDENTITY:Aadhar', label: 'Aadhar Card', formType: 'IDENTITY', requirement: 'Aadhar' },
   { value: 'IDENTITY:PAN', label: 'PAN Card', formType: 'IDENTITY', requirement: 'PAN' },
