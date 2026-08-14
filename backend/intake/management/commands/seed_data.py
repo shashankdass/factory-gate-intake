@@ -263,9 +263,13 @@ class Command(BaseCommand):
                 # otherwise litter the bucket with a new object each time.
                 if not doc.storage_key:
                     doc.storage_key = self._placeholder(
-                        f"{requirement.name} — {name}", "worker_docs"
+                        f"{requirement.name} - {name}", "worker_docs"
                     )
-                    doc.save(update_fields=["storage_key"])
+                    # Older seeds stamped a placeholder example.com URL that
+                    # rendered a paperclip and then 404'd. get_or_create never
+                    # revisits defaults, so clear it on the way past.
+                    doc.file_url = ""
+                    doc.save(update_fields=["storage_key", "file_url"])
 
     # -- placeholder documents ----------------------------------------------
     @staticmethod
@@ -278,7 +282,13 @@ class Command(BaseCommand):
         """
         from intake import storage
 
-        body = f"Sample document for demonstration\n{title}"
+        # PDF text here is Latin-1; anything outside it (an em dash, a rupee
+        # sign, a Devanagari name) would raise on encode. Fold to ASCII first —
+        # this is a placeholder, not a document anyone reads closely.
+        title = (
+            title.replace("\u2014", "-").replace("\u2013", "-")
+            .encode("ascii", "replace").decode("ascii")
+        )
         stream = (
             f"BT /F1 14 Tf 60 760 Td (Sample document for demonstration) Tj "
             f"0 -24 Td ({title}) Tj ET"
@@ -294,8 +304,13 @@ class Command(BaseCommand):
             "trailer<</Root 1 0 R>>\n%%EOF\n"
         )
         try:
-            return storage.upload(pdf.encode("latin-1"), "application/pdf", prefix, "sample.pdf")
-        except Exception:  # noqa: BLE001 — seeding must never fail on storage
+            return storage.upload(
+                pdf.encode("latin-1", "replace"), "application/pdf", prefix, "sample.pdf"
+            )
+        except Exception as exc:  # noqa: BLE001 — seeding must never fail on storage
+            # Silently returning "" here once hid an encoding bug behind a
+            # paperclip that 404'd, so say something.
+            print(f"    ! placeholder upload failed ({exc})")
             return ""
 
     # -- 5-pillar intake records --------------------------------------------
@@ -359,7 +374,7 @@ class Command(BaseCommand):
                     vision=med["vision"],
                     blood_type=med["blood_type"],
                     storage_key=self._placeholder(
-                        f"Medical fitness — {worker.name}", "intake_docs"
+                        f"Medical fitness - {worker.name}", "intake_docs"
                     ),
                 )  # expiry auto-computed
 
@@ -370,9 +385,21 @@ class Command(BaseCommand):
                     certificate_number=pol["cert"],
                     verification_status=pol["status"],
                     storage_key=self._placeholder(
-                        f"Police verification — {worker.name}", "intake_docs"
+                        f"Police verification - {worker.name}", "intake_docs"
                     ),
                 )
+
+            # Backfill placeholders for pillar records seeded before documents
+            # were stored, so their paperclips resolve too.
+            for record, label, in (
+                (worker.medical_records.order_by("-exam_date").first(), "Medical fitness"),
+                (worker.police_verifications.order_by("-issue_date").first(), "Police verification"),
+            ):
+                if record is not None and not record.storage_key:
+                    record.storage_key = self._placeholder(
+                        f"{label} - {worker.name}", "intake_docs"
+                    )
+                    record.save(update_fields=["storage_key"])
 
             # Trade test + safety video: mark Ravi complete so he stays Ready;
             # leave the rest for the Field Officer to administer.
