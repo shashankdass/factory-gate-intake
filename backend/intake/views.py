@@ -38,6 +38,7 @@ import csv
 import io
 from datetime import timedelta
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
@@ -50,8 +51,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from . import ocr, resume as resume_parser, storage
-from . import crypto
+from . import crypto, doctype, ocr, resume as resume_parser, storage
 from .models import (
     INTAKE_EXPIRY_DAYS,
     CandidateProfile,
@@ -68,11 +68,13 @@ from .models import (
     TradeTestQuestion,
     User,
     Worker,
+    WorkerBankAccount,
     WorkerDocument,
     category_for_skill,
 )
 from .serializers import (
     CandidateProfileSerializer,
+    WorkerBankAccountSerializer,
     IntakeListSerializer,
     IntakeMedicalRecordSerializer,
     IntakePoliceVerificationSerializer,
@@ -124,6 +126,7 @@ def _prefetched(queryset):
         "police_verifications",
         "trade_test_attempts",
         "candidate_profile__candidate_skills__skill",
+        "bank_account",
     )
 
 
@@ -166,6 +169,35 @@ def _parse_iso_date(value):
         return timezone.datetime.fromisoformat(str(value)).date()
     except ValueError:
         return None
+
+
+def _slot_for(doc_type: str, requirement_name: str = "") -> str:
+    """Map a doc_type (+ requirement) onto the intake slot it belongs to."""
+    if doc_type == "IDENTITY":
+        return {
+            "Aadhar": "aadhaar",
+            "PAN": "pan",
+            "Safety Training": "safety",
+        }.get(requirement_name, "aadhaar")
+    return {"MEDICAL": "medical", "POLICE": "pvc", "BANK": "bank"}.get(doc_type, doc_type.lower())
+
+
+_SLOT_DOC_TYPE = {
+    "aadhaar": ("IDENTITY", "Aadhar"),
+    "pan": ("IDENTITY", "PAN"),
+    "safety": ("IDENTITY", "Safety Training"),
+    "medical": ("MEDICAL", ""),
+    "pvc": ("POLICE", ""),
+    "bank": ("BANK", ""),
+}
+
+
+def _doc_type_for_slot(slot: str) -> str:
+    return _SLOT_DOC_TYPE.get(slot, ("IDENTITY", ""))[0]
+
+
+def _requirement_for_slot(slot: str) -> str:
+    return _SLOT_DOC_TYPE.get(slot, ("IDENTITY", ""))[1]
 
 
 def _as_bool(value):
@@ -729,6 +761,18 @@ class VerificationStatusView(APIView):
                 "label": "Resume",
                 "status": "VERIFIED" if (profile and profile.resume_key) else "MISSING",
                 "doc_url": storage.signed_url(profile.resume_key) if profile else None,
+            })
+
+            # --- Bank account (payroll, not a gate pillar) ---
+            try:
+                bank = w.bank_account
+            except WorkerBankAccount.DoesNotExist:
+                bank = None
+            items.append({
+                "key": "BANK",
+                "label": "Bank",
+                "status": "VERIFIED" if (bank and bank.account_number_encrypted) else "MISSING",
+                "doc_url": link(bank) if bank else None,
             })
 
             remaining = sum(1 for it in items if it["status"] not in self._DONE)
@@ -1303,20 +1347,31 @@ class OcrExtractView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         doc_type = (request.data.get("doc_type") or "").upper()
-        if doc_type not in {"IDENTITY", "MEDICAL", "POLICE"}:
+        if doc_type not in {"IDENTITY", "MEDICAL", "POLICE", "BANK"}:
             return Response(
-                {"detail": "doc_type must be IDENTITY, MEDICAL or POLICE."},
+                {"detail": "doc_type must be IDENTITY, MEDICAL, POLICE or BANK."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         requirement_name = request.data.get("requirement_name", "")
+        # Which intake slot this file was dropped into, so we can tell an
+        # Aadhaar card from a PAN card (both are doc_type IDENTITY).
+        slot = (request.data.get("slot") or _slot_for(doc_type, requirement_name)).lower()
         today = timezone.now().date()
 
-        fields, provider, note = ocr.extract_fields(
+        fields, provider, note, text = ocr.extract_fields(
             upload.read(), upload.name, upload.content_type,
             doc_type, requirement_name, today,
         )
+        check = doctype.check_document(slot, text, fields)
         return Response(
-            {"form_type": doc_type, "fields": fields, "provider": provider, "note": note}
+            {
+                "form_type": doc_type,
+                "slot": slot,
+                "fields": fields,
+                "provider": provider,
+                "note": note,
+                "check": check.as_dict(),
+            }
         )
 
 
@@ -1547,6 +1602,19 @@ class UnifiedIntakeView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # The Aadhaar card is the one document that must be on file — it is the
+        # identity the gate scans against. Everything else can be typed in and
+        # the scan supplied later.
+        if request.FILES.get("aadhaar_file") is None:
+            return Response(
+                {
+                    "detail": "An Aadhaar card scan is required. Every other document "
+                    "is optional and its details can be entered directly.",
+                    "missing_document": "aadhaar_file",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         # -- 2. validate the dated pillars before touching anything ---------
         exam_date = issue_date = None
         if request.FILES.get("medical_file") or data.get("exam_date"):
@@ -1571,6 +1639,7 @@ class UnifiedIntakeView(APIView):
             ("safety", "safety_file", "worker_docs"),
             ("medical", "medical_file", "intake_docs"),
             ("pvc", "pvc_file", "intake_docs"),
+            ("bank", "bank_file", "intake_docs"),
             ("resume", "resume_file", "resumes"),
         ]
         items, resume_pages = [], []
@@ -1590,6 +1659,31 @@ class UnifiedIntakeView(APIView):
             })
             if slot == "resume":
                 resume_pages.append((blob, upload.content_type))
+
+        # -- 3b. verify each scan really is the document its slot expects ---
+        # Which slots to check server-side is a cost decision: each check is an
+        # OCR round trip. The default verifies the Aadhaar only — it is the
+        # mandatory, identity-critical one — while the browser has already
+        # checked every slot as the file was attached. Set
+        # VERIFY_DOCUMENT_TYPES="all" to enforce them all, or "none" to skip.
+        policy = getattr(settings, "VERIFY_DOCUMENT_TYPES", "aadhaar").lower()
+        if policy != "none":
+            to_check = [i for i in items if i["slot"] != "resume"]
+            if policy != "all":
+                to_check = [i for i in to_check if i["slot"] == "aadhaar"]
+            for item in to_check:
+                fields, _provider, _note, text = ocr.extract_fields(
+                    item["data"], item["filename"], item["content_type"],
+                    _doc_type_for_slot(item["slot"]), _requirement_for_slot(item["slot"]),
+                    today,
+                )
+                verdict = doctype.check_document(item["slot"], text, fields)
+                if not verdict.ok:
+                    return Response(
+                        {"detail": verdict.message, "document_check": verdict.as_dict(),
+                         "slot": item["slot"]},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
 
         keys = storage.upload_many(items)
 
@@ -1653,6 +1747,18 @@ class UnifiedIntakeView(APIView):
                         ),
                         storage_key=keys.get("pvc", ""),
                     )
+
+                account_number = (data.get("bank_account_number") or "").strip()
+                if account_number or keys.get("bank"):
+                    bank = WorkerBankAccount(
+                        worker=worker,
+                        ifsc=(data.get("ifsc") or "").strip().upper(),
+                        bank_name=(data.get("bank_name") or "").strip(),
+                        account_holder_name=(data.get("account_holder_name") or "").strip(),
+                        storage_key=keys.get("bank", ""),
+                    )
+                    bank.set_account_number(account_number)
+                    bank.save()
 
                 if extraction is not None:
                     _persist_candidate_profile(

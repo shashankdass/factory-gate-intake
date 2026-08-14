@@ -5,10 +5,12 @@ every operational endpoint is scoped to the caller's own pool.
 """
 from datetime import timedelta
 
+from unittest.mock import patch
+
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
 
-from intake.models import CandidateProfile, Worker
+from intake.models import CandidateProfile, Worker, WorkerBankAccount
 
 pytestmark = pytest.mark.django_db
 
@@ -133,17 +135,131 @@ def test_malformed_aadhaar_is_rejected(as_contractor, today, requirements):
     assert response.status_code == 400
 
 
-def test_partial_intake_is_allowed(as_contractor, today, requirements):
-    """Only the identity fields are mandatory — documents can follow later."""
+def test_partial_intake_is_allowed_with_just_the_aadhaar(as_contractor, today,
+                                                          requirements):
+    """Every document except the Aadhaar can follow later."""
     response = as_contractor.post(
         ONBOARD_URL,
-        {"name": "Anil Sharma", "aadhar_number": "100000000043", "skill_type": "Fitter"},
+        {
+            "name": "Anil Sharma",
+            "aadhar_number": "100000000043",
+            "skill_type": "Fitter",
+            "aadhaar_file": _pdf("aadhaar.pdf"),
+        },
         format="multipart",
     )
 
     assert response.status_code == 201
-    assert response.json()["documents_stored"] == []
+    assert response.json()["documents_stored"] == ["aadhaar"]
     assert response.json()["compliance"]["is_compliant"] is False
+
+
+def test_aadhaar_scan_is_mandatory(as_contractor, requirements):
+    """The identity the gate scans against cannot be left to follow later."""
+    response = as_contractor.post(
+        ONBOARD_URL,
+        {"name": "Anil Sharma", "aadhar_number": "100000000044", "skill_type": "Fitter"},
+        format="multipart",
+    )
+
+    assert response.status_code == 400
+    assert response.json()["missing_document"] == "aadhaar_file"
+    assert not Worker.objects.filter(aadhar_number="100000000044").exists()
+
+
+def test_a_wrong_document_in_the_aadhaar_slot_is_refused(as_contractor, today,
+                                                          requirements, settings):
+    """A resume attached as identity evidence must not be stored."""
+    settings.VERIFY_DOCUMENT_TYPES = "aadhaar"
+    resume_text = (
+        "CURRICULUM VITAE\nCareer Objective: welder\nWork Experience: 6 years\n"
+        "Educational Qualification: ITI\nDeclaration: I hereby declare"
+    )
+    payload = _payload(today)
+    payload["aadhaar_file"] = SimpleUploadedFile(
+        "cv.txt", resume_text.encode(), "text/plain"
+    )
+
+    # Patch extract_fields, not extract_text: the mock OCR provider the suite
+    # runs on short-circuits before extract_text is ever reached.
+    with patch("intake.ocr.extract_fields", return_value=({}, "stub", None, resume_text)):
+        response = as_contractor.post(ONBOARD_URL, payload, format="multipart")
+
+    assert response.status_code == 400
+    assert response.json()["document_check"]["status"] == "MISMATCH"
+    assert "resume" in response.json()["detail"].lower()
+    assert not Worker.objects.filter(aadhar_number="100000000042").exists()
+
+
+def test_an_unreadable_scan_is_never_refused(as_contractor, today, requirements,
+                                             settings):
+    """Field reality: bad light and dead OCR providers must not block intake."""
+    settings.VERIFY_DOCUMENT_TYPES = "all"
+
+    with patch("intake.ocr.extract_fields",
+               return_value=({}, "stub", "provider down", "")):
+        response = as_contractor.post(ONBOARD_URL, _payload(today), format="multipart")
+
+    assert response.status_code == 201
+
+
+def test_bank_details_are_captured_and_encrypted(as_contractor, today, requirements):
+    payload = _payload(today)
+    payload.update({
+        "bank_account_number": "50100123456789",
+        "ifsc": "HDFC0001234",
+        "bank_name": "HDFC Bank",
+        "bank_file": _pdf("cheque.pdf"),
+    })
+
+    response = as_contractor.post(ONBOARD_URL, payload, format="multipart")
+
+    assert response.status_code == 201
+    account = WorkerBankAccount.objects.get(worker__aadhar_number="100000000042")
+    assert account.account_number == "50100123456789"   # decrypts
+    assert account.ifsc == "HDFC0001234"
+    assert account.storage_key                          # cheque stored privately
+
+    # ...but never in plaintext on disk.
+    from django.db import connection
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT account_number_encrypted FROM worker_bank_accounts WHERE id = %s",
+            [account.id],
+        )
+        raw = cursor.fetchone()[0]
+    raw = bytes(raw) if not isinstance(raw, bytes) else raw
+    assert b"50100123456789" not in raw
+
+
+def test_bank_account_is_masked_from_the_api_by_default(as_contractor, today,
+                                                        requirements):
+    payload = _payload(today)
+    payload["bank_account_number"] = "50100123456789"
+    as_contractor.post(ONBOARD_URL, payload, format="multipart")
+
+    body = as_contractor.get("/api/workers/").json()
+    account = next(w["bank_account"] for w in body if w["bank_account"])
+
+    # The owning contractor sees it in full; the ciphertext is never exposed.
+    assert account["account_number"] == "50100123456789"
+    assert "account_number_encrypted" not in account
+
+
+def test_a_shared_bank_account_is_surfaced(as_contractor, today, requirements,
+                                           contractor, compliant_worker):
+    """Several workers on one account is the classic ghost-worker signature."""
+    first = WorkerBankAccount(worker=compliant_worker)
+    first.set_account_number("50100123456789")
+    first.save()
+
+    payload = _payload(today)
+    payload["bank_account_number"] = "50100123456789"
+    as_contractor.post(ONBOARD_URL, payload, format="multipart")
+
+    second = WorkerBankAccount.objects.get(worker__aadhar_number="100000000042")
+    assert second.shared_with().count() == 1
 
 
 def test_pe_cannot_onboard_workers(as_pe, today, requirements):
@@ -204,6 +320,6 @@ def test_verification_status_reports_every_pillar(as_contractor, compliant_worke
 
     keys = [item["key"] for item in rows[0]["items"]]
     assert keys == ["Aadhar", "PAN", "Safety Training", "MEDICAL", "POLICE",
-                    "TRADE_TEST", "SAFETY_VIDEO", "RESUME"]
-    # Everything verified except the resume, which has not been scanned.
-    assert rows[0]["remaining"] == 1
+                    "TRADE_TEST", "SAFETY_VIDEO", "RESUME", "BANK"]
+    # Everything verified except the resume and bank account.
+    assert rows[0]["remaining"] == 2

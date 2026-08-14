@@ -4,7 +4,7 @@
 #
 # Tells the whole story in one run:
 #   1. Contractor states workforce demand and searches their own pool
-#   2. Onboards a worker with all six documents in a single pass
+#   2. Onboards a worker with all seven documents in a single pass
 #   3. Resume is parsed; PII is encrypted at rest but still searchable
 #   4. Documents are private — every link is short-lived and presigned
 #   5. Trade test and safety video, the two non-document pillars
@@ -93,30 +93,34 @@ note "\"Fixable\" is the useful number: short on paperwork, not short on people.
 hold
 
 # ---------------------------------------------------------------------------
-act "2 · Onboarding a worker — six documents, one submission"
+act "2 · Onboarding a worker — seven documents, one submission"
 
 printf '%%PDF-1.4 Aadhaar card scan'   > "$TMP/aadhaar.pdf"
 printf '%%PDF-1.4 PAN card scan'       > "$TMP/pan.pdf"
 printf '%%PDF-1.4 Safety certificate'  > "$TMP/safety.pdf"
 printf '%%PDF-1.4 Medical report'      > "$TMP/medical.pdf"
 printf '%%PDF-1.4 Police verification' > "$TMP/pvc.pdf"
+printf '%%PDF-1.4 HDFC BANK A/C No: 50100123456789 IFSC: HDFC0001234' > "$TMP/cheque.pdf"
 printf '%%PDF-1.4 Resume — Ravi Kumar, Welder, 6 yrs' > "$TMP/resume.pdf"
 
 TODAY=$(python3 -c 'import datetime;print(datetime.date.today())')
 RECENT=$(python3 -c 'import datetime;print(datetime.date.today()-datetime.timedelta(days=30))')
 FUTURE=$(python3 -c 'import datetime;print(datetime.date.today()+datetime.timedelta(days=180))')
 
-step "Uploading Aadhaar, PAN, Safety cert, Medical, PVC and Resume together"
+step "Uploading all seven documents together"
+note "The Aadhaar scan is the only mandatory one — everything else can be typed."
 CREATED=$(curl -s --max-time 180 -X POST "$API/api/intake/onboard-worker/" -H "$CH" \
   -F "name=Demo Worker" -F "aadhar_number=$DEMO_AADHAAR" -F "skill_type=Carpenter" \
   -F "pan_number=ABCDE1234F" -F "safety_expiry=$FUTURE" \
   -F "exam_date=$RECENT" -F "vision=6/6" -F "blood_type=O+" \
   -F "certificate_number=PVC-DEMO-1" -F "issue_date=$RECENT" \
+  -F "bank_account_number=50100123456789" -F "ifsc=HDFC0001234" -F "bank_name=HDFC Bank" \
   -F "aadhaar_file=@$TMP/aadhaar.pdf;type=application/pdf" \
   -F "pan_file=@$TMP/pan.pdf;type=application/pdf" \
   -F "safety_file=@$TMP/safety.pdf;type=application/pdf" \
   -F "medical_file=@$TMP/medical.pdf;type=application/pdf" \
   -F "pvc_file=@$TMP/pvc.pdf;type=application/pdf" \
+  -F "bank_file=@$TMP/cheque.pdf;type=application/pdf" \
   -F "resume_file=@$TMP/resume.pdf;type=application/pdf")
 
 DEMO_ID=$(echo "$CREATED" | jqp 'print(d["worker"]["id"])')
@@ -125,6 +129,16 @@ echo "$CREATED" | jqp 'print("   stored:", ", ".join(d["documents_stored"]))'
 ok "Worker #$DEMO_ID created with every document in one round trip"
 note "Validated first, uploaded concurrently, written in one transaction —"
 note "an expired document can never leave a half-created worker behind."
+hold
+
+step "Bank details — encrypted at rest, masked on shared screens"
+curl -s "$API/api/workers/" -H "$CH" | jqp "
+w = next((w for w in d if w['aadhar_number']=='$DEMO_AADHAAR'), None)
+b = (w or {}).get('bank_account') or {}
+print('   account   ', b.get('account_number') or '—')
+print('   ifsc      ', b.get('ifsc') or '—')
+print('   shared with', b.get('shared_with_count', 0), 'other worker(s)')"
+note "Several workers on one account is the classic ghost-worker signature."
 hold
 
 step "What the resume parser extracted"

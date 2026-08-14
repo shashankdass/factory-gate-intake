@@ -916,6 +916,66 @@ class CandidateProfile(models.Model):
         )
 
 
+class WorkerBankAccount(models.Model):
+    """Where the worker gets paid. One account per worker.
+
+    The account number is PII in the same sense as a phone number, so it gets the
+    same treatment: AES-256 ciphertext plus a keyed blind index. The blind index
+    earns its keep here beyond lookups — several "different" workers sharing one
+    account is the classic ghost-worker signature, and this makes that
+    detectable without ever storing a comparable account number.
+
+    IFSC and bank name are public routing information, not PII, so they stay in
+    plaintext where they can be indexed and validated.
+    """
+
+    worker = models.OneToOneField(
+        Worker, on_delete=models.CASCADE, related_name="bank_account"
+    )
+    account_number_encrypted = models.BinaryField(null=True, blank=True)
+    # Not UNIQUE: relatives legitimately share an account. Indexed so the
+    # collision can be surfaced for review rather than silently blocked.
+    account_number_hash = models.BinaryField(null=True, blank=True, db_index=True)
+
+    ifsc = models.CharField(max_length=11, blank=True, default="", db_index=True)
+    bank_name = models.CharField(max_length=120, blank=True, default="")
+    account_holder_name = models.CharField(max_length=150, blank=True, default="")
+
+    # Cancelled cheque or passbook page, in the private bucket.
+    storage_key = models.CharField(max_length=500, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "worker_bank_accounts"
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return f"Bank account · {self.worker.name}"
+
+    def set_account_number(self, number: str | None) -> None:
+        from . import crypto
+
+        digits = "".join(ch for ch in (number or "") if ch.isdigit())
+        self.account_number_encrypted = crypto.encrypt(digits)
+        self.account_number_hash = crypto.blind_index(digits)
+
+    @property
+    def account_number(self) -> str | None:
+        from . import crypto
+
+        return crypto.decrypt(self.account_number_encrypted)
+
+    def shared_with(self):
+        """Other workers registered against this same account number."""
+        if not self.account_number_hash:
+            return WorkerBankAccount.objects.none()
+        return (
+            WorkerBankAccount.objects.filter(account_number_hash=self.account_number_hash)
+            .exclude(pk=self.pk)
+            .select_related("worker")
+        )
+
+
 class CandidateNameToken(models.Model):
     """Searchable-encryption side table for candidate names.
 

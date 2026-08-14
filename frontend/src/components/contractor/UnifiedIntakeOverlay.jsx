@@ -20,14 +20,16 @@ const SLOTS = [
     label: 'Aadhaar card',
     hint: 'Identity — required for gate entry',
     fills: 'name + Aadhaar number',
-    read: { kind: 'ocr', docType: 'IDENTITY', requirement: 'Aadhar' },
+    // The one mandatory upload: it is the identity the gate scans against.
+    required: true,
+    read: { kind: 'ocr', docType: 'IDENTITY', requirement: 'Aadhar', slot: 'aadhaar' },
   },
   {
     key: 'pan_file',
     label: 'PAN card',
     hint: 'Identity',
     fills: 'PAN number',
-    read: { kind: 'ocr', docType: 'IDENTITY', requirement: 'PAN' },
+    read: { kind: 'ocr', docType: 'IDENTITY', requirement: 'PAN', slot: 'pan' },
   },
   {
     key: 'safety_file',
@@ -41,14 +43,21 @@ const SLOTS = [
     label: 'Medical fitness report',
     hint: 'Valid 1 year from exam date',
     fills: 'exam date, vision, blood type, flags',
-    read: { kind: 'ocr', docType: 'MEDICAL' },
+    read: { kind: 'ocr', docType: 'MEDICAL', slot: 'medical' },
   },
   {
     key: 'pvc_file',
     label: 'Police verification (PVC)',
     hint: 'Valid 1 year from issue date',
     fills: 'certificate number + issue date',
-    read: { kind: 'ocr', docType: 'POLICE' },
+    read: { kind: 'ocr', docType: 'POLICE', slot: 'pvc' },
+  },
+  {
+    key: 'bank_file',
+    label: 'Cancelled cheque or passbook',
+    hint: 'Where wages are paid',
+    fills: 'account number, IFSC, bank',
+    read: { kind: 'ocr', docType: 'BANK', slot: 'bank' },
   },
   {
     key: 'resume_file',
@@ -72,6 +81,9 @@ const EMPTY = {
   vertigo: false,
   certificate_number: '',
   issue_date: '',
+  bank_account_number: '',
+  ifsc: '',
+  bank_name: '',
 }
 
 /** Map one OCR / resume payload onto the form's field names. */
@@ -98,6 +110,12 @@ export function toFormPatch(slotKey, fields) {
         certificate_number: f.certificate_number || '',
         issue_date: f.issue_date || '',
       }
+    case 'bank_file':
+      return {
+        bank_account_number: String(f.bank_account_number || '').replace(/\D/g, ''),
+        ifsc: String(f.ifsc || '').toUpperCase(),
+        bank_name: f.bank_name || '',
+      }
     case 'resume_file':
       // The first parsed skill is a reasonable guess at the trade.
       return { name: f.name || '', skill_type: (f.skills && f.skills[0]) || '' }
@@ -116,6 +134,8 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
   // closes — leaking these pins the whole file in memory.
   const [previews, setPreviews] = useState({}) // { slotKey: {url, kind} }
   const [busy, setBusy] = useState(false)
+  const [slotErrors, setSlotErrors] = useState({}) // { slotKey: 'why it was refused' }
+  const [slotWarnings, setSlotWarnings] = useState({}) // { slotKey: [note, …] }
   const [resumePreview, setResumePreview] = useState(null)
   const [error, setError] = useState(null)
   const [done, setDone] = useState(null)
@@ -137,6 +157,8 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
       setForm(EMPTY)
       setFiles({})
       setReading({})
+      setSlotErrors({})
+      setSlotWarnings({})
       setPreviews((p) => {
         Object.values(p).forEach((v) => v?.url && URL.revokeObjectURL(v.url))
         return {}
@@ -182,6 +204,19 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
     })
   }
 
+  /** Drop a file that turned out to be the wrong kind of document. */
+  function rejectSlot(slot, message) {
+    setFiles((f) => ({ ...f, [slot.key]: undefined }))
+    setPreviews((prev) => {
+      prev[slot.key]?.url && URL.revokeObjectURL(prev[slot.key].url)
+      const next = { ...prev }
+      delete next[slot.key]
+      return next
+    })
+    setReading((r) => ({ ...r, [slot.key]: undefined }))
+    setSlotErrors((e) => ({ ...e, [slot.key]: message }))
+  }
+
   /** OCR one attached document and merge whatever it yields. */
   async function readSlot(slot, file) {
     if (!slot.read || !file) return
@@ -196,7 +231,20 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
         const fd = withFile('file', file)
         fd.append('doc_type', slot.read.docType)
         if (slot.read.requirement) fd.append('requirement_name', slot.read.requirement)
+        if (slot.read.slot) fd.append('slot', slot.read.slot)
         const res = await api.ocrExtract(token, fd)
+
+        // Wrong document for this slot — refuse it outright rather than
+        // storing a resume as someone's identity evidence. Only a positive
+        // identification of a *different* type gets here; an unreadable scan
+        // is allowed through with a warning.
+        if (res.check && res.check.status === 'MISMATCH') {
+          rejectSlot(slot, res.check.message)
+          return
+        }
+        if (res.check?.warnings?.length) {
+          setSlotWarnings((w) => ({ ...w, [slot.key]: res.check.warnings }))
+        }
         fields = res.fields
       }
       const patch = toFormPatch(slot.key, fields)
@@ -212,6 +260,8 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
   function pick(slot, file) {
     setFiles((f) => ({ ...f, [slot.key]: file || undefined }))
     setError(null)
+    setSlotErrors((e) => ({ ...e, [slot.key]: undefined }))
+    setSlotWarnings((w) => ({ ...w, [slot.key]: undefined }))
 
     // Swap the thumbnail, releasing whatever was there before.
     setPreviews((prev) => {
@@ -270,8 +320,12 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
     }
   }
 
+  const aadhaarAttached = !!files.aadhaar_file
   const identityReady =
-    form.name.trim() && form.skill_type.trim() && form.aadhar_number.length === 12
+    form.name.trim() &&
+    form.skill_type.trim() &&
+    form.aadhar_number.length === 12 &&
+    aadhaarAttached
   const attached = Object.values(files).filter(Boolean).length
   const anyReading = Object.values(reading).some((s) => s === 'reading')
 
@@ -313,6 +367,8 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
                     file={files[slot.key]}
                     status={reading[slot.key]}
                     preview={previews[slot.key]}
+                    error={slotErrors[slot.key]}
+                    warnings={slotWarnings[slot.key]}
                     onPick={(f) => pick(slot, f)}
                   />
                 ))}
@@ -447,6 +503,47 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
                   />
                 </label>
               </div>
+
+              <div className="ui-subhead">Bank account (for wages)</div>
+              <div className="ui-grid">
+                <label className="wb-field">
+                  <span>Account number</span>
+                  <input
+                    inputMode="numeric"
+                    placeholder="50100123456789"
+                    value={form.bank_account_number}
+                    onChange={(e) =>
+                      set('bank_account_number', e.target.value.replace(/\D/g, '').slice(0, 18))
+                    }
+                  />
+                </label>
+                <label className="wb-field">
+                  <span>IFSC</span>
+                  <input
+                    placeholder="HDFC0001234"
+                    maxLength={11}
+                    value={form.ifsc}
+                    onChange={(e) => set('ifsc', e.target.value.toUpperCase())}
+                  />
+                </label>
+                <label className="wb-field">
+                  <span>Bank name</span>
+                  <input
+                    placeholder="HDFC Bank"
+                    value={form.bank_name}
+                    onChange={(e) => set('bank_name', e.target.value)}
+                  />
+                </label>
+              </div>
+              {form.ifsc && !/^[A-Z]{4}0[A-Z0-9]{6}$/.test(form.ifsc) && (
+                <div className="inline-msg error">
+                  An IFSC is 4 letters, a zero, then 6 characters — e.g. HDFC0001234.
+                </div>
+              )}
+              <div className="muted">
+                The account number is encrypted at rest, like the worker's phone and
+                email. Only the last four digits are shown back on shared screens.
+              </div>
             </section>
 
             {/* --- 4. Resume, parsed on attach --- */}
@@ -466,6 +563,9 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
             <span className="muted">
               {attached} of {SLOTS.length} documents attached
               {anyReading ? ' · reading…' : ''}
+              {!aadhaarAttached && (
+                <span className="ui-required-note"> · Aadhaar card required</span>
+              )}
             </span>
             <div className="row gap">
               <button className="btn ghost" onClick={onClose} disabled={busy}>
@@ -493,11 +593,11 @@ const STATUS_LABEL = {
   error: { text: '⚠ could not read', tone: 'amber' },
 }
 
-function FileSlot({ slot, file, status, preview, onPick }) {
+function FileSlot({ slot, file, status, preview, error, warnings, onPick }) {
   const inputRef = useRef(null)
   const badge = status ? STATUS_LABEL[status] : null
   return (
-    <div className={`ui-slot ${file ? 'filled' : ''}`}>
+    <div className={`ui-slot ${file ? 'filled' : ''} ${error ? 'rejected' : ''}`}>
       <input
         ref={inputRef}
         type="file"
@@ -508,7 +608,10 @@ function FileSlot({ slot, file, status, preview, onPick }) {
 
       <div className="ui-slot-row">
         <div className="ui-slot-main">
-          <div className="ui-slot-label">{slot.label}</div>
+          <div className="ui-slot-label">
+            {slot.label}
+            {slot.required && <span className="ui-required">required</span>}
+          </div>
           <div className="muted">{file ? file.name : slot.hint}</div>
           {file && badge && (
             <span className={`badge ${badge.tone} ui-slot-status`}>{badge.text}</span>
@@ -527,6 +630,13 @@ function FileSlot({ slot, file, status, preview, onPick }) {
           </button>
         )}
       </div>
+
+      {/* The file was the wrong kind of document and was not kept. */}
+      {error && <div className="ui-slot-error">⚠ {error}</div>}
+
+      {warnings?.map((warning) => (
+        <div key={warning} className="ui-slot-warning">{warning}</div>
+      ))}
 
       {/* Thumbnail so the extracted values can be checked against the document
           itself. Click to open it full size in a new tab. */}

@@ -108,7 +108,7 @@ experience, qualification and skills live in `candidate_profiles` / `skills` /
 filtering.
 
 **Storage.** Every uploaded document — Aadhaar, PAN, Safety certificate, Medical,
-PVC and Resume — goes to one **private** S3-compatible bucket (Supabase Storage,
+PVC, bank proof and Resume — goes to one **private** S3-compatible bucket (Supabase Storage,
 Cloudflare R2 or MinIO) under an opaque, unguessable key. Nothing is public: the
 dashboard fetches short-lived **presigned** download links on demand
 (`PRESIGN_EXPIRY_SECONDS`, default 15 min). The unified intake uploads its six
@@ -116,6 +116,38 @@ documents concurrently, so the whole set costs about as much wall-clock as the
 slowest single file. With no `S3_ENDPOINT_URL` configured the app falls back to a
 local HMAC-signed filesystem backend, preserving the private + expiring-link
 contract for zero-config local development.
+
+## Document verification and bank details
+
+**The Aadhaar scan is mandatory**; every other document is optional and its
+details can be typed straight in. That asymmetry is deliberate — the Aadhaar is
+the identity the gate scans against, so it cannot be left to follow later.
+
+**Wrong-slot uploads are refused.** `intake/doctype.py` scores the OCR text of an
+uploaded file against a signature per document type (textual markers plus
+structural identifiers — Aadhaar's Verhoeff checksum, PAN and IFSC formats) and
+compares the slot the user chose against the best-scoring alternative. Attach a
+resume to the Aadhaar slot and it is rejected by name:
+
+> This looks like a resume, not an Aadhaar card. Attach it to the right slot.
+
+The rule is deliberately asymmetric: **reject only on positive evidence of a
+different document, never on absent evidence.** A phone photo in bad light, a
+scan with no text layer, or an OCR provider that is down all yield little text —
+blocking those would make intake unusable in exactly the field conditions this
+product exists for. They pass with an "unverified, check it visually" note.
+Identifier checks warn rather than block, since demo and test data legitimately
+use numbers that were never issued.
+
+`VERIFY_DOCUMENT_TYPES` controls how much is re-checked server-side
+(`aadhaar` — the default and the mandatory one, `all`, or `none`); the browser
+checks every slot as the file is attached either way.
+
+**Bank details** (account number, IFSC, bank name) are captured from a cancelled
+cheque or passbook photo. The account number is encrypted at rest with the same
+machinery as the worker's phone and email, and its blind index doubles as a
+fraud signal: several workers registered against one account is the classic
+ghost-worker signature, surfaced as `shared_with_count`.
 
 ## Local development
 

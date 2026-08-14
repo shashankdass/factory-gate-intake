@@ -232,6 +232,9 @@ class Command(BaseCommand):
             ),
         ]
 
+        # Seeded documents used to carry a fake example.com file_url, which
+        # rendered a paperclip that 404'd. Upload a real placeholder instead so
+        # every link in a demo actually opens.
         for name, aadhar_no, skill, docs in worker_specs:
             worker, _ = Worker.objects.get_or_create(
                 aadhar_number=aadhar_no,
@@ -246,7 +249,7 @@ class Command(BaseCommand):
             worker.save()
 
             for requirement, doc_status, expiry, rejection in docs:
-                WorkerDocument.objects.get_or_create(
+                doc, created = WorkerDocument.objects.get_or_create(
                     worker=worker,
                     requirement=requirement,
                     defaults={
@@ -254,9 +257,46 @@ class Command(BaseCommand):
                         "verification_status": doc_status,
                         "expiry_date": expiry,
                         "rejection_reason": rejection,
-                        "file_url": "https://example.com/sample-document.pdf",
                     },
                 )
+                # Only upload once — the seed runs on every deploy and would
+                # otherwise litter the bucket with a new object each time.
+                if not doc.storage_key:
+                    doc.storage_key = self._placeholder(
+                        f"{requirement.name} — {name}", "worker_docs"
+                    )
+                    doc.save(update_fields=["storage_key"])
+
+    # -- placeholder documents ----------------------------------------------
+    @staticmethod
+    def _placeholder(title: str, prefix: str) -> str:
+        """Store a minimal, valid one-page PDF and return its object key.
+
+        Real bytes rather than a fake URL: a demo where the paperclip opens a
+        readable page is worth the few hundred bytes, and it exercises the same
+        signed-link path that production uploads use.
+        """
+        from intake import storage
+
+        body = f"Sample document for demonstration\n{title}"
+        stream = (
+            f"BT /F1 14 Tf 60 760 Td (Sample document for demonstration) Tj "
+            f"0 -24 Td ({title}) Tj ET"
+        )
+        pdf = (
+            "%PDF-1.4\n"
+            "1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+            "2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+            "3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]"
+            "/Resources<</Font<</F1 4 0 R>>>>/Contents 5 0 R>>endobj\n"
+            "4 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\n"
+            f"5 0 obj<</Length {len(stream)}>>stream\n{stream}\nendstream endobj\n"
+            "trailer<</Root 1 0 R>>\n%%EOF\n"
+        )
+        try:
+            return storage.upload(pdf.encode("latin-1"), "application/pdf", prefix, "sample.pdf")
+        except Exception:  # noqa: BLE001 — seeding must never fail on storage
+            return ""
 
     # -- 5-pillar intake records --------------------------------------------
     def _seed_intake_pillars(self) -> None:
@@ -318,6 +358,9 @@ class Command(BaseCommand):
                     vertigo=med["vertigo"],
                     vision=med["vision"],
                     blood_type=med["blood_type"],
+                    storage_key=self._placeholder(
+                        f"Medical fitness — {worker.name}", "intake_docs"
+                    ),
                 )  # expiry auto-computed
 
             if pol and not worker.police_verifications.exists():
@@ -326,6 +369,9 @@ class Command(BaseCommand):
                     issue_date=pol["issue_date"],
                     certificate_number=pol["cert"],
                     verification_status=pol["status"],
+                    storage_key=self._placeholder(
+                        f"Police verification — {worker.name}", "intake_docs"
+                    ),
                 )
 
             # Trade test + safety video: mark Ravi complete so he stays Ready;

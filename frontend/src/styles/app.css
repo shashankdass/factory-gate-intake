@@ -1579,3 +1579,45 @@ textarea {
 .ui-section-head h3 {
   margin: 0 0 12px;
 }
+
+/* --- Unified intake: required marker, refusal + warning messages ---------- */
+.ui-required {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #fef2f2;
+  color: var(--red);
+  border: 1px solid #fecaca;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  vertical-align: middle;
+}
+.ui-slot.rejected {
+  border-color: #fecaca;
+  border-style: solid;
+  background: #fff5f5;
+}
+.ui-slot-error {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #fef2f2;
+  color: #991b1b;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.ui-slot-warning {
+  margin-top: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.ui-required-note {
+  color: var(--red);
+  font-weight: 600;
+}

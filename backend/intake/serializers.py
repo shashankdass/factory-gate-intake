@@ -16,6 +16,7 @@ from .models import (
     TradeTestQuestion,
     User,
     Worker,
+    WorkerBankAccount,
     WorkerDocument,
 )
 
@@ -128,6 +129,49 @@ class SkillSerializer(serializers.ModelSerializer):
         fields = ["id", "name"]
 
 
+class WorkerBankAccountSerializer(SignedUrlMixin, serializers.ModelSerializer):
+    """Payment details.
+
+    The account number is masked unless the caller owns the worker — a payroll
+    number is exactly the kind of field that should not be casually readable off
+    a shared screen. ``shared_with_count`` surfaces the ghost-worker signal:
+    several workers registered against one account.
+    """
+
+    account_number = serializers.SerializerMethodField()
+    download_url = serializers.SerializerMethodField()
+    shared_with_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = WorkerBankAccount
+        fields = [
+            "id",
+            "worker",
+            "account_number",
+            "ifsc",
+            "bank_name",
+            "account_holder_name",
+            "download_url",
+            "shared_with_count",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+    def get_account_number(self, obj):
+        number = obj.account_number
+        if not number:
+            return None
+        if self.context.get("reveal_pii"):
+            return number
+        return "•" * max(0, len(number) - 4) + number[-4:]
+
+    def get_download_url(self, obj):
+        return self._download_url(obj)
+
+    def get_shared_with_count(self, obj):
+        return obj.shared_with().count()
+
+
 class CandidateProfileSerializer(SignedUrlMixin, serializers.ModelSerializer):
     """Resume-derived profile.
 
@@ -198,6 +242,8 @@ class WorkerSerializer(serializers.ModelSerializer):
     safety_video = serializers.SerializerMethodField()
     # Resume profile (null until a resume has been scanned).
     candidate_profile = serializers.SerializerMethodField()
+    # Payment details (null until a cheque/passbook is captured).
+    bank_account = serializers.SerializerMethodField()
 
     class Meta:
         model = Worker
@@ -213,6 +259,7 @@ class WorkerSerializer(serializers.ModelSerializer):
             "trade_test_attempts",
             "safety_video",
             "candidate_profile",
+            "bank_account",
             "created_at",
         ]
         read_only_fields = ["created_at", "trade_test_status"]
@@ -223,6 +270,13 @@ class WorkerSerializer(serializers.ModelSerializer):
         except ObjectDoesNotExist:
             return None
         return CandidateProfileSerializer(profile, context=self.context).data
+
+    def get_bank_account(self, obj):
+        try:
+            account = obj.bank_account
+        except ObjectDoesNotExist:
+            return None
+        return WorkerBankAccountSerializer(account, context=self.context).data
 
     def get_trade_test_attempts(self, obj):
         return obj.trade_test_attempts.count()

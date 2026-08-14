@@ -92,6 +92,11 @@ def parse_fields(text: str, doc_type: str, requirement_name: str = "") -> dict:
     t = text or ""
     up = t.upper()
 
+    if doc_type == "BANK":
+        from .doctype import extract_bank_fields
+
+        return extract_bank_fields(t)
+
     if doc_type == "MEDICAL":
         vm = re.search(r"\b6\s*/\s*(6|9|12|18|24|36|60)\b", t)
         # No trailing \b — a sign like "+" is non-word, so "B+" has no boundary after it.
@@ -143,6 +148,9 @@ def parse_fields(text: str, doc_type: str, requirement_name: str = "") -> dict:
 
 
 def mock_fields(doc_type: str, requirement_name: str, today) -> dict:
+    if doc_type == "BANK":
+        return {"bank_account_number": "50100123456789", "ifsc": "HDFC0001234",
+                "bank_name": "Hdfc Bank"}
     if doc_type == "MEDICAL":
         return {"exam_date": (today - timedelta(days=30)).isoformat(), "vision": "6/6",
                 "blood_type": "O+", "color_blindness": False, "vertigo": False}
@@ -155,12 +163,16 @@ def mock_fields(doc_type: str, requirement_name: str, today) -> dict:
 
 
 def extract_fields(file_bytes, filename, content_type, doc_type, requirement_name, today):
-    """``(fields, provider, note)`` for the intake workbench's right-hand form."""
+    """``(fields, provider, note, text)`` for the intake forms.
+
+    The raw text comes back too so the caller can run the document-type check
+    (see ``doctype.check_document``) without paying for a second OCR pass.
+    """
     provider = os.environ.get("OCR_PROVIDER", "ocrspace").lower()
     if provider == "mock":
-        return mock_fields(doc_type, requirement_name, today), "mock", None
+        return mock_fields(doc_type, requirement_name, today), "mock", None, ""
 
     text, provider, err = extract_text(file_bytes, filename, content_type)
     if not text or not text.strip():
-        return {}, provider, err or "No text detected — enter the values manually."
-    return parse_fields(text, doc_type, requirement_name), provider, None
+        return {}, provider, err or "No text detected — enter the values manually.", ""
+    return parse_fields(text, doc_type, requirement_name), provider, None, text

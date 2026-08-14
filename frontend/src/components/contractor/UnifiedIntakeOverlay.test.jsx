@@ -42,6 +42,11 @@ const OCR = {
     vertigo: false,
   },
   POLICE: { certificate_number: 'PVC-2026-8842', issue_date: '2026-07-01' },
+  BANK: {
+    bank_account_number: '50100123456789',
+    ifsc: 'HDFC0001234',
+    bank_name: 'Hdfc Bank',
+  },
 }
 
 const pdf = (name = 'scan.pdf') =>
@@ -55,7 +60,16 @@ async function attach(user, label, file) {
   return slot
 }
 
-async function fillIdentity(user) {
+async function fillIdentity(user, { withAadhaarFile = true } = {}) {
+  // The Aadhaar scan is mandatory, so a "complete" form always includes it.
+  if (withAadhaarFile) {
+    api.ocrExtract.mockImplementationOnce(async () => ({
+      fields: {},
+      provider: 'mock',
+      check: { status: 'OK', ok: true, message: 'ok', warnings: [] },
+    }))
+    await attach(user, /aadhaar card/i, pdf('aadhaar.pdf'))
+  }
   await user.type(screen.getByLabelText(/full name/i), 'Mahesh Patil')
   await user.type(screen.getByLabelText(/aadhaar number/i), '100000000042')
   await user.type(screen.getByLabelText(/skill \/ trade/i), 'Mason')
@@ -73,7 +87,12 @@ describe('UnifiedIntakeOverlay', () => {
     api.ocrExtract.mockReset()
     api.ocrExtract.mockImplementation(async (_token, fd) => {
       const key = [fd.get('doc_type'), fd.get('requirement_name')].filter(Boolean).join('_')
-      return { form_type: fd.get('doc_type'), fields: OCR[key] || {}, provider: 'mock' }
+      return {
+        form_type: fd.get('doc_type'),
+        fields: OCR[key] || {},
+        provider: 'mock',
+        check: { status: 'OK', ok: true, message: 'Looks right.', warnings: [] },
+      }
     })
   })
 
@@ -91,7 +110,7 @@ describe('UnifiedIntakeOverlay', () => {
     expect(headings[2]).toMatch(/details/i)
   })
 
-  it('offers a slot for all six documents in one pass', () => {
+  it('offers a slot for every document in one pass', () => {
     renderWithAuth(<UnifiedIntakeOverlay open onClose={vi.fn()} />)
 
     for (const label of [
@@ -100,6 +119,7 @@ describe('UnifiedIntakeOverlay', () => {
       /safety training certificate/i,
       /medical fitness report/i,
       /police verification/i,
+      /cancelled cheque or passbook/i,
       /resume \/ cv/i,
     ]) {
       expect(screen.getByText(label, { selector: '.ui-slot-label' })).toBeInTheDocument()
@@ -294,7 +314,6 @@ describe('UnifiedIntakeOverlay', () => {
     const user = userEvent.setup()
     renderWithAuth(<UnifiedIntakeOverlay open onClose={vi.fn()} onCreated={vi.fn()} />)
     await fillIdentity(user)
-    await attach(user, /aadhaar card/i, pdf('aadhaar.pdf'))
     await user.click(submitButton())
 
     await waitFor(() => expect(api.onboardWorker).toHaveBeenCalled())
@@ -310,9 +329,9 @@ describe('UnifiedIntakeOverlay', () => {
     const user = userEvent.setup()
     renderWithAuth(<UnifiedIntakeOverlay open onClose={vi.fn()} />)
 
-    expect(screen.getByText(/0 of 6 documents attached/)).toBeInTheDocument()
+    expect(screen.getByText(/0 of 7 documents attached/)).toBeInTheDocument()
     await attach(user, /pan card/i, pdf('pan.pdf'))
-    expect(screen.getByText(/1 of 6 documents attached/)).toBeInTheDocument()
+    expect(screen.getByText(/1 of 7 documents attached/)).toBeInTheDocument()
   })
 
   it('reports what is still outstanding after onboarding', async () => {
@@ -338,6 +357,136 @@ describe('UnifiedIntakeOverlay', () => {
     expect(await screen.findByText(/more than 365 days old/)).toBeInTheDocument()
   })
 
+  // --- Mandatory Aadhaar ---------------------------------------------------
+  it('will not submit without an Aadhaar scan, however complete the form is', async () => {
+    const user = userEvent.setup()
+    renderWithAuth(<UnifiedIntakeOverlay open onClose={vi.fn()} />)
+
+    await fillIdentity(user, { withAadhaarFile: false })
+
+    expect(submitButton()).toBeDisabled()
+    expect(screen.getByText(/aadhaar card required/i)).toBeInTheDocument()
+  })
+
+  it('enables submit once the Aadhaar scan is attached', async () => {
+    const user = userEvent.setup()
+    renderWithAuth(<UnifiedIntakeOverlay open onClose={vi.fn()} />)
+    await fillIdentity(user, { withAadhaarFile: false })
+    expect(submitButton()).toBeDisabled()
+
+    await attach(user, /aadhaar card/i, pdf('aadhaar.pdf'))
+
+    await waitFor(() => expect(submitButton()).toBeEnabled())
+  })
+
+  it('marks only the Aadhaar slot as required', () => {
+    renderWithAuth(<UnifiedIntakeOverlay open onClose={vi.fn()} />)
+
+    const required = document.querySelectorAll('.ui-required')
+    expect(required).toHaveLength(1)
+    expect(required[0].closest('.ui-slot')).toHaveTextContent(/aadhaar card/i)
+  })
+
+  // --- Wrong document in a slot -------------------------------------------
+  it('refuses a document that belongs in another slot', async () => {
+    const user = userEvent.setup()
+    api.ocrExtract.mockImplementation(async () => ({
+      fields: {},
+      provider: 'mock',
+      check: {
+        status: 'MISMATCH',
+        ok: false,
+        message: 'This looks like a resume, not an Aadhaar card. Attach it to the right slot.',
+        warnings: [],
+      },
+    }))
+    renderWithAuth(<UnifiedIntakeOverlay open onClose={vi.fn()} />)
+
+    const slot = await attach(user, /aadhaar card/i, pdf('actually-a-resume.pdf'))
+
+    expect(await screen.findByText(/this looks like a resume/i)).toBeInTheDocument()
+    // The file is not kept — no thumbnail, and submit stays blocked.
+    expect(slot.querySelector('.ui-thumb')).not.toBeInTheDocument()
+    expect(screen.getByText(/0 of 7 documents attached/)).toBeInTheDocument()
+  })
+
+  it('clears the refusal when a correct document is attached', async () => {
+    const user = userEvent.setup()
+    api.ocrExtract.mockImplementationOnce(async () => ({
+      fields: {},
+      provider: 'mock',
+      check: { status: 'MISMATCH', ok: false, message: 'This looks like a resume', warnings: [] },
+    }))
+    renderWithAuth(<UnifiedIntakeOverlay open onClose={vi.fn()} />)
+
+    await attach(user, /aadhaar card/i, pdf('wrong.pdf'))
+    expect(await screen.findByText(/this looks like a resume/i)).toBeInTheDocument()
+
+    await attach(user, /aadhaar card/i, pdf('aadhaar.pdf'))
+
+    await waitFor(() =>
+      expect(screen.queryByText(/this looks like a resume/i)).not.toBeInTheDocument()
+    )
+  })
+
+  it('shows a checksum warning without refusing the document', async () => {
+    const user = userEvent.setup()
+    api.ocrExtract.mockImplementation(async () => ({
+      fields: { name: 'Ravi Kumar', aadhar_number: '100000000001' },
+      provider: 'mock',
+      check: {
+        status: 'OK',
+        ok: true,
+        message: 'Looks like an Aadhaar card.',
+        warnings: ['The Aadhaar number read from this document fails its checksum.'],
+      },
+    }))
+    renderWithAuth(<UnifiedIntakeOverlay open onClose={vi.fn()} />)
+
+    const slot = await attach(user, /aadhaar card/i, pdf('aadhaar.pdf'))
+
+    expect(await screen.findByText(/fails its checksum/i)).toBeInTheDocument()
+    // Warning, not refusal — the file is still attached.
+    expect(slot.querySelector('.ui-thumb')).toBeInTheDocument()
+  })
+
+  // --- Bank details --------------------------------------------------------
+  it('reads a cheque into the bank fields', async () => {
+    const user = userEvent.setup()
+    renderWithAuth(<UnifiedIntakeOverlay open onClose={vi.fn()} />)
+
+    await attach(user, /cancelled cheque or passbook/i, pdf('cheque.pdf'))
+
+    await waitFor(() =>
+      expect(screen.getByLabelText(/account number/i)).toHaveValue('50100123456789')
+    )
+    expect(screen.getByLabelText(/ifsc/i)).toHaveValue('HDFC0001234')
+    expect(screen.getByLabelText(/bank name/i)).toHaveValue('Hdfc Bank')
+  })
+
+  it('flags a malformed IFSC', async () => {
+    const user = userEvent.setup()
+    renderWithAuth(<UnifiedIntakeOverlay open onClose={vi.fn()} />)
+
+    await user.type(screen.getByLabelText(/ifsc/i), 'NOTANIFSC')
+
+    expect(screen.getByText(/an ifsc is 4 letters/i)).toBeInTheDocument()
+  })
+
+  it('submits the bank details with everything else', async () => {
+    const user = userEvent.setup()
+    renderWithAuth(<UnifiedIntakeOverlay open onClose={vi.fn()} onCreated={vi.fn()} />)
+    await fillIdentity(user)
+    await user.type(screen.getByLabelText(/account number/i), '50100123456789')
+    await user.type(screen.getByLabelText(/ifsc/i), 'HDFC0001234')
+    await user.click(submitButton())
+
+    await waitFor(() => expect(api.onboardWorker).toHaveBeenCalled())
+    const [, formData] = api.onboardWorker.mock.calls[0]
+    expect(formData.get('bank_account_number')).toBe('50100123456789')
+    expect(formData.get('ifsc')).toBe('HDFC0001234')
+  })
+
   it('closes on Escape', async () => {
     const user = userEvent.setup()
     const onClose = vi.fn()
@@ -359,6 +508,11 @@ describe('toFormPatch', () => {
       .toEqual({ certificate_number: 'X-1', issue_date: '2026-01-01' })
     expect(toFormPatch('resume_file', { name: 'R K', skills: ['Welder', 'Fitter'] }))
       .toEqual({ name: 'R K', skill_type: 'Welder' })
+    expect(toFormPatch('bank_file', {
+      bank_account_number: '5010 0123 4567', ifsc: 'hdfc0001234', bank_name: 'HDFC Bank',
+    })).toEqual({
+      bank_account_number: '501001234567', ifsc: 'HDFC0001234', bank_name: 'HDFC Bank',
+    })
   })
 
   it('tolerates an empty extraction', () => {

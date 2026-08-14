@@ -231,6 +231,12 @@ ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-5")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
+# Which intake slots are re-verified server-side as being the document they
+# claim to be ("aadhaar" | "all" | "none"). Each check costs an OCR round trip,
+# so the default verifies only the mandatory identity document; the browser
+# already checks every slot as the file is attached.
+VERIFY_DOCUMENT_TYPES = os.environ.get("VERIFY_DOCUMENT_TYPES", "aadhaar").lower()
+
 # Should a missing/unparsed resume block deployment?
 # Off by default so the seeded demo workers stay deployable; the resume pillar is
 # still reported in every compliance payload either way.
