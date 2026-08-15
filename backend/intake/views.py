@@ -1745,12 +1745,13 @@ class UnifiedIntakeView(APIView):
                 resume_pages.append((blob, upload.content_type))
 
         # -- 3b. verify each scan really is the document its slot expects ---
-        # Which slots to check server-side is a cost decision: each check is an
-        # OCR round trip. The default verifies the Aadhaar only — it is the
-        # mandatory, identity-critical one — while the browser has already
-        # checked every slot as the file was attached. Set
-        # VERIFY_DOCUMENT_TYPES="all" to enforce them all, or "none" to skip.
-        policy = getattr(settings, "VERIFY_DOCUMENT_TYPES", "aadhaar").lower()
+        # Every slot by default. The browser runs the same check as each file is
+        # attached, but that is a convenience: a direct API call never runs it,
+        # and a failed OCR round trip in the browser leaves the file attached.
+        # This is the check that actually keeps a resume out of the bank slot.
+        # VERIFY_DOCUMENT_TYPES="aadhaar" narrows it to the identity document,
+        # "none" skips it — both trade correctness for OCR spend.
+        policy = getattr(settings, "VERIFY_DOCUMENT_TYPES", "all").lower()
         if policy != "none":
             to_check = [i for i in items if i["slot"] != "resume"]
             if policy != "all":

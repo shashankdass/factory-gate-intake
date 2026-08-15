@@ -28,7 +28,8 @@ S3_ENDPOINT_URL = ""
 S3_ACCESS_KEY_ID = ""
 S3_SECRET_ACCESS_KEY = ""
 RESUME_PARSER_PROVIDER = "mock"
-VERIFY_DOCUMENT_TYPES = "aadhaar"
+# Match what ships. Tests that need a narrower policy set it themselves.
+VERIFY_DOCUMENT_TYPES = "all"
 
 # Resume stays advisory by default so the fixtures mirror production defaults;
 # the test that cares flips it explicitly.

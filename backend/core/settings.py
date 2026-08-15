@@ -232,10 +232,18 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
 # Which intake slots are re-verified server-side as being the document they
-# claim to be ("aadhaar" | "all" | "none"). Each check costs an OCR round trip,
-# so the default verifies only the mandatory identity document; the browser
-# already checks every slot as the file is attached.
-VERIFY_DOCUMENT_TYPES = os.environ.get("VERIFY_DOCUMENT_TYPES", "aadhaar").lower()
+# claim to be ("all" | "aadhaar" | "none").
+#
+# This defaulted to "aadhaar" on the reasoning that the browser already checks
+# every slot as the file is attached, so the server need only re-check the
+# identity-critical one. That reasoning was wrong: the browser is a convenience,
+# not a control. A direct API call never runs it, and even in the UI a failed
+# OCR round trip leaves the file attached — so a resume could be submitted as
+# someone's cancelled cheque and stored.
+#
+# "all" costs one OCR round trip per attached non-resume slot instead of one
+# per worker. That is the price of the check meaning anything.
+VERIFY_DOCUMENT_TYPES = os.environ.get("VERIFY_DOCUMENT_TYPES", "all").lower()
 
 # Should a missing/unparsed resume block deployment?
 # Off by default so the seeded demo workers stay deployable; the resume pillar is

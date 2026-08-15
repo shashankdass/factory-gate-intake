@@ -220,6 +220,85 @@ def test_the_us_resume_that_got_through_is_refused_at_submit(as_contractor, toda
     assert not Worker.objects.filter(aadhar_number="100000000042").exists()
 
 
+# Genuine OCR text per slot, so one slot at a time can be spoiled.
+_REAL_TEXT = {
+    "aadhaar.pdf": "GOVERNMENT OF INDIA Ravi Kumar 2345 6789 0123 UIDAI "
+                   "Unique Identification Authority of India",
+    "pan.pdf": "INCOME TAX DEPARTMENT Permanent Account Number ABCDE1234F "
+               "GOVT. OF INDIA Signature",
+    "medical.pdf": "MEDICAL FITNESS CERTIFICATE physically fit vision 6/6 "
+                   "blood group examination Dr. Sharma",
+    "pvc.pdf": "POLICE VERIFICATION CERTIFICATE character antecedents "
+               "no adverse report police station",
+    "safety.pdf": "SAFETY TRAINING certificate of completion induction PPE "
+                  "has successfully completed valid till",
+    "bank.pdf": "HDFC BANK LTD Pay to or bearer A/C No 50100123456789 "
+                "IFSC HDFC0001234 MICR 400240123 savings account",
+}
+_US_RESUME = (
+    "John Doe\nGeneral Laborer\n10042 Main St.\nFresno, Ca 93730\n"
+    "(408) 000 0000\nstudent@gmail.com\n\nSKILLS\n"
+    "Familiar with fundamental construction processes, demolition, carpentry "
+    "and plumbing.\nCan safely and effectively drive a bobcat for drilling and "
+    "excavation\nEnergetic laborer willing to work overtime"
+)
+
+
+@pytest.mark.parametrize(
+    "slot,filename",
+    [("aadhaar", "aadhaar.pdf"), ("pan", "pan.pdf"), ("bank", "bank.pdf"),
+     ("medical", "medical.pdf"), ("pvc", "pvc.pdf")],
+)
+def test_every_slot_is_verified_at_submit_not_just_the_aadhaar(
+    as_contractor, today, requirements, slot, filename
+):
+    """The browser checks every slot, but the browser is not the control.
+
+    A direct API call never runs it, and a failed OCR round trip in the browser
+    leaves the file attached. Verifying only the Aadhaar server-side meant a
+    resume could be submitted and stored as someone's cancelled cheque.
+    """
+    payload = _payload(today)
+    payload["bank_file"] = _pdf("bank.pdf")
+    payload["bank_account_number"] = "50100123456789"
+    payload["ifsc"] = "HDFC0001234"
+    # Spoil exactly one slot; every other document reads correctly.
+    payload[f"{slot}_file"] = SimpleUploadedFile(
+        filename, _US_RESUME.encode(), "application/pdf"
+    )
+
+    def fake(data, name, ctype, *a, **k):
+        return ({}, "stub", None,
+                _US_RESUME if name == filename else _REAL_TEXT.get(name, ""))
+
+    with patch("intake.ocr.extract_fields", side_effect=fake):
+        response = as_contractor.post(ONBOARD_URL, payload, format="multipart")
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["slot"] == slot
+    assert "resume" in body["detail"].lower()
+    assert not Worker.objects.filter(aadhar_number="100000000042").exists()
+
+
+def test_narrowing_the_policy_still_works(as_contractor, today, requirements,
+                                          settings):
+    """"aadhaar" remains available for anyone trading correctness for OCR spend."""
+    settings.VERIFY_DOCUMENT_TYPES = "aadhaar"
+    payload = _payload(today)
+    payload["bank_file"] = SimpleUploadedFile("bank.pdf", _US_RESUME.encode(),
+                                              "application/pdf")
+
+    def fake(data, name, ctype, *a, **k):
+        return ({}, "stub", None,
+                _US_RESUME if name == "bank.pdf" else _REAL_TEXT.get(name, ""))
+
+    with patch("intake.ocr.extract_fields", side_effect=fake):
+        response = as_contractor.post(ONBOARD_URL, payload, format="multipart")
+
+    assert response.status_code == 201
+
+
 def test_an_unreadable_scan_is_never_refused(as_contractor, today, requirements,
                                              settings):
     """Field reality: bad light and dead OCR providers must not block intake."""
