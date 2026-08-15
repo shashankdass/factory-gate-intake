@@ -1258,6 +1258,13 @@ class GateCheckView(APIView):
                     "name": worker.name,
                     "skill_type": worker.skill_type,
                     "aadhar_number": worker.aadhar_number,
+                    # The one check the system cannot make for the guard: is the
+                    # person at the gate the person these papers belong to. Sent
+                    # on a denial too — the guard may still need to identify who
+                    # they are turning away.
+                    "photo_url": (
+                        storage.signed_url(worker.photo_key) if worker.photo_key else None
+                    ),
                 },
                 "checked_at": timezone.now().isoformat(),
             }

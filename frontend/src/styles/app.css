@@ -684,6 +684,50 @@ textarea {
   opacity: 0.9;
   font-size: 14px;
 }
+.gate-identity {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  text-align: left;
+  flex-wrap: wrap;
+}
+/* Big enough to actually compare a face at arm's length on a gate terminal —
+   a 44px avatar is for a list, not for deciding who walks in. */
+.gate-photo {
+  margin: 0;
+  flex: 0 0 auto;
+}
+.gate-photo img,
+.gate-photo-none {
+  width: 132px;
+  height: 132px;
+  border-radius: 12px;
+  object-fit: cover;
+  display: block;
+  border: 3px solid rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.15);
+}
+.gate-photo-none {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 56px;
+  border-style: dashed;
+  opacity: 0.75;
+}
+.gate-photo figcaption {
+  margin-top: 6px;
+  font-size: 12px;
+  max-width: 132px;
+  opacity: 0.9;
+  line-height: 1.3;
+}
+/* The absence of a photo is a caveat on the verdict, so it is not allowed to
+   sit quietly in the same grey as everything else. */
+.gate-photo.missing figcaption {
+  font-weight: 700;
+}
 
 /* ------------- Contractor Verification & Testing workbench ------------- */
 .workbench {

@@ -128,3 +128,47 @@ def test_denied_payload_carries_the_full_compliance_detail(
 
 def test_gate_check_requires_an_aadhar(as_gate):
     assert as_gate.get(GATE_URL).status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# The worker photo — the one check the system cannot make for the guard
+# ---------------------------------------------------------------------------
+def test_the_photo_is_sent_so_the_guard_can_check_the_face(
+    as_gate, approved_list, compliant_worker
+):
+    compliant_worker.photo_key = "gate-intake/worker_photos/abc.jpg"
+    compliant_worker.save(update_fields=["photo_key"])
+
+    body = as_gate.get(
+        f"/api/gate-check/?aadhar={compliant_worker.aadhar_number}"
+    ).json()
+
+    assert body["access"] == "GRANTED"
+    assert body["worker"]["photo_url"]
+
+
+def test_the_photo_is_sent_on_a_denial_too(as_gate, compliant_worker):
+    """The guard may still need to identify who they are turning away."""
+    compliant_worker.photo_key = "gate-intake/worker_photos/abc.jpg"
+    compliant_worker.save(update_fields=["photo_key"])
+
+    body = as_gate.get(
+        f"/api/gate-check/?aadhar={compliant_worker.aadhar_number}"
+    ).json()
+
+    assert body["access"] == "DENIED"
+    assert body["worker"]["photo_url"]
+
+
+def test_a_worker_without_a_photo_is_still_granted_entry(
+    as_gate, approved_list, compliant_worker
+):
+    """A missing photograph is not a reason to hold someone at the gate."""
+    assert compliant_worker.photo_key == ""
+
+    body = as_gate.get(
+        f"/api/gate-check/?aadhar={compliant_worker.aadhar_number}"
+    ).json()
+
+    assert body["access"] == "GRANTED"
+    assert body["worker"]["photo_url"] is None

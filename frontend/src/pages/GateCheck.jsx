@@ -68,13 +68,31 @@ export default function GateCheck() {
           </div>
           <div className="verdict-detail">
             {result.worker ? (
-              <>
+              <div className="gate-identity">
+                {/* The one check the system cannot make: whether the person at
+                    the gate is the person these papers belong to. */}
+                {result.worker.photo_url ? (
+                  <figure className="gate-photo">
+                    <img src={result.worker.photo_url} alt={result.worker.name} />
+                    <figcaption>Compare with the person at the gate</figcaption>
+                  </figure>
+                ) : (
+                  /* Said out loud rather than left as a blank space. An empty
+                     frame beside ACCESS GRANTED reads as though a face was
+                     checked, which is the opposite of what happened. */
+                  <figure className="gate-photo missing">
+                    <div className="gate-photo-none">👤</div>
+                    <figcaption>No photo on record — verify ID another way</figcaption>
+                  </figure>
+                )}
                 <div>
-                  <strong>{result.worker.name}</strong> — {result.worker.skill_type}
+                  <div>
+                    <strong>{result.worker.name}</strong> — {result.worker.skill_type}
+                  </div>
+                  <div>Aadhar {result.worker.aadhar_number}</div>
+                  {result.project && <div>Project: {result.project}</div>}
                 </div>
-                <div>Aadhar {result.worker.aadhar_number}</div>
-                {result.project && <div>Project: {result.project}</div>}
-              </>
+              </div>
             ) : null}
             <div className="verdict-reason">{result.reason}</div>
 

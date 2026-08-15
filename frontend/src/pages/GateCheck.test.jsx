@@ -170,3 +170,74 @@ describe('GateCheck', () => {
     expect(await screen.findByText(/gate service unreachable/)).toBeInTheDocument()
   })
 })
+
+describe('worker photo at the gate', () => {
+  beforeEach(() => {
+    api.gateCheck.mockReset()
+  })
+
+  const granted = (worker) => async () => ({
+    access: 'GRANTED',
+    reason_code: 'COMPLIANT',
+    reason: 'Approved and currently compliant.',
+    worker,
+    project: 'Plant 2 Expansion',
+    compliance: { is_compliant: true, gaps: [] },
+    checked_at: '2026-08-15T09:00:00Z',
+  })
+
+  it('shows the face so the guard can compare it with the person', async () => {
+    const user = userEvent.setup()
+    api.gateCheck.mockImplementation(
+      granted({ ...WORKER, photo_url: 'https://signed.example/face.jpg?t=1' })
+    )
+    renderWithAuth(<GateCheck />)
+
+    await scan(user)
+
+    const photo = await screen.findByAltText('Ravi Kumar')
+    expect(photo).toHaveAttribute('src', 'https://signed.example/face.jpg?t=1')
+    expect(screen.getByText(/compare with the person at the gate/i)).toBeInTheDocument()
+  })
+
+  it('says out loud when there is no photo to compare against', async () => {
+    // A blank frame beside ACCESS GRANTED would read as though a face had been
+    // checked. The guard has to know the system made no such check.
+    const user = userEvent.setup()
+    api.gateCheck.mockImplementation(granted({ ...WORKER, photo_url: null }))
+    renderWithAuth(<GateCheck />)
+
+    await scan(user)
+
+    expect(await screen.findByText(/no photo on record/i)).toBeInTheDocument()
+    expect(screen.queryByAltText('Ravi Kumar')).not.toBeInTheDocument()
+  })
+
+  it('does not hold a worker at the gate for having no photo', async () => {
+    const user = userEvent.setup()
+    api.gateCheck.mockImplementation(granted({ ...WORKER, photo_url: null }))
+    renderWithAuth(<GateCheck />)
+
+    await scan(user)
+
+    expect(await screen.findByText('ACCESS GRANTED')).toBeInTheDocument()
+    expect(screen.getByText('ISSUE GATE PASS')).toBeInTheDocument()
+  })
+
+  it('shows the face on a denial too, to identify who is being turned away', async () => {
+    const user = userEvent.setup()
+    api.gateCheck.mockImplementation(async () => ({
+      access: 'DENIED',
+      reason_code: 'DOCUMENT_EXPIRED',
+      reason: 'Medical fitness expired.',
+      worker: { ...WORKER, photo_url: 'https://signed.example/face.jpg?t=2' },
+      compliance: { is_compliant: false, gaps: [] },
+    }))
+    renderWithAuth(<GateCheck />)
+
+    await scan(user)
+
+    expect(await screen.findByText(/ACCESS DENIED — DOCUMENT EXPIRED/)).toBeInTheDocument()
+    expect(screen.getByAltText('Ravi Kumar')).toBeInTheDocument()
+  })
+})
