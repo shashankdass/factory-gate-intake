@@ -58,6 +58,33 @@ Key Skills: welding, fitting
 Declaration: I hereby declare that the above is true.
 """
 
+# The one that actually got through: an ordinary US-style template, with none
+# of the Indian resume conventions the first marker list was built from.
+US_RESUME = """
+John Doe
+General Laborer
+10042 Main St.
+Fresno, Ca 93730
+(408) 000 0000
+student@gmail.com
+
+SKILLS
+Familiar with fundamental construction processes, demolition, carpentry and plumbing.
+Can safely and effectively drive a bobcat for drilling and excavation
+Knowledgeable of Safety Data Sheet hazards and state requirements/regulations
+Can utilize industry equipment, and heavy-duty power tools safely and efficiently
+Energetic laborer willing to work overtime until customer satisfaction is met
+Carries out assignments and tasks promptly
+"""
+
+# Long enough that OCR demonstrably worked, carrying no document's marks.
+READABLE_BUT_UNMARKED = (
+    "To whom it may concern. The bearer of this letter has been known to the "
+    "undersigned for a period of several years and has conducted himself in a "
+    "manner that reflects well upon his character and general disposition "
+    "throughout the entirety of that acquaintance, without exception noted."
+)
+
 
 # ---------------------------------------------------------------------------
 # The happy path: each document in its own slot
@@ -108,6 +135,81 @@ def test_the_refusal_names_both_documents():
     assert "aadhaar card" in verdict.message.lower()
     assert verdict.as_dict()["detected_label"] == "resume"
     assert verdict.as_dict()["expected_label"] == "Aadhaar card"
+
+
+# ---------------------------------------------------------------------------
+# A resume written to any convention, not just the Indian one
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("slot", ["aadhaar", "pan", "bank"])
+def test_a_us_style_resume_is_refused(slot):
+    """This exact document was accepted into the Aadhaar slot in production.
+
+    It scored zero everywhere: the resume markers were all Indian conventions
+    ("declaration", "curriculum vitae"), and this template has none of them.
+    """
+    verdict = doctype.check_document(slot, US_RESUME, {})
+
+    assert verdict.status == "MISMATCH"
+    assert "resume" in verdict.message.lower()
+
+
+def test_a_us_style_resume_still_passes_in_the_resume_slot():
+    assert doctype.check_document("resume", US_RESUME, {}).status == "OK"
+
+
+# ---------------------------------------------------------------------------
+# Defining evidence: absence counts, but only once OCR has demonstrably worked
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "slot,hint",
+    [("aadhaar", "uidai"), ("pan", "income tax"), ("bank", "ifsc")],
+)
+def test_a_readable_page_without_the_defining_mark_is_refused(slot, hint):
+    """An Aadhaar card always bears a number or UIDAI markings. A wall of clean
+    text carrying neither has been read, and is not an Aadhaar card."""
+    verdict = doctype.check_document(slot, READABLE_BUT_UNMARKED, {})
+
+    assert verdict.status == "MISMATCH"
+    assert hint in verdict.message.lower()
+
+
+def test_the_refusal_says_what_was_missing_when_nothing_else_scored():
+    verdict = doctype.check_document("aadhaar", READABLE_BUT_UNMARKED, {})
+
+    assert "does not look like an Aadhaar card" in verdict.message
+    # Nothing else identified it, so no other type is named.
+    assert verdict.detected is None
+
+
+def test_the_same_text_below_the_threshold_is_not_refused():
+    """The guarantee that keeps the product usable: a partial read is a shrug."""
+    short = READABLE_BUT_UNMARKED[:150]
+    assert len(short) < doctype.MIN_DEFINING_TEXT
+
+    verdict = doctype.check_document("aadhaar", short, {})
+
+    assert verdict.status == "UNVERIFIED"
+    assert verdict.ok is True
+
+
+@pytest.mark.parametrize(
+    "slot,text",
+    [("aadhaar", AADHAAR), ("pan", PAN), ("bank", CHEQUE)],
+)
+def test_a_long_genuine_document_still_passes(slot, text):
+    """Padding a real document past the threshold must not start rejecting it."""
+    padded = text + "\n" + ("Additional printed matter on the reverse side. " * 8)
+    assert len(padded) > doctype.MIN_DEFINING_TEXT
+
+    assert doctype.check_document(slot, padded, {}).status == "OK"
+
+
+def test_free_form_documents_are_exempt_from_the_defining_rule():
+    """A medical or police certificate has no universal mark, so the rule that
+    reads silence as evidence must not apply to them."""
+    for slot in ("medical", "pvc", "safety"):
+        verdict = doctype.check_document(slot, READABLE_BUT_UNMARKED, {})
+        assert verdict.ok is True, slot
 
 
 # ---------------------------------------------------------------------------

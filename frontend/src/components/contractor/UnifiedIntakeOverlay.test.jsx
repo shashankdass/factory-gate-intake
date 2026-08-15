@@ -181,7 +181,29 @@ describe('UnifiedIntakeOverlay', () => {
     renderWithAuth(<UnifiedIntakeOverlay open onClose={vi.fn()} />)
 
     const slot = await attach(user, /aadhaar card/i, pdf('aadhaar.pdf'))
-    await waitFor(() => expect(slot.querySelector('.ui-slot-status')).toHaveTextContent('read'))
+    await waitFor(() =>
+      expect(slot.querySelector('.ui-slot-status')).toHaveTextContent(/verified/i)
+    )
+  })
+
+  it('does not call a document verified when the type was never confirmed', async () => {
+    // The green tick used to mean "OCR returned a field", which is how a resume
+    // that happily yielded a name showed up as ✅ read in the Aadhaar slot.
+    const user = userEvent.setup()
+    api.ocrExtract.mockImplementation(async () => ({
+      fields: { name: 'John Doe' },
+      provider: 'mock',
+      check: { status: 'UNVERIFIED', ok: true, message: 'Could not confirm.', warnings: [] },
+    }))
+    renderWithAuth(<UnifiedIntakeOverlay open onClose={vi.fn()} />)
+
+    const slot = await attach(user, /aadhaar card/i, pdf('aadhaar.pdf'))
+
+    await waitFor(() =>
+      expect(slot.querySelector('.ui-slot-status')).toHaveTextContent(/not verified/i)
+    )
+    // The fields it did read are still offered — unverified is not a rejection.
+    expect(screen.getByLabelText(/full name/i)).toHaveValue('John Doe')
   })
 
   it('says so when a document yields nothing readable', async () => {

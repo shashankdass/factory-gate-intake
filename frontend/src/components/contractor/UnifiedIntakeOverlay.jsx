@@ -223,6 +223,9 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
     setReading((r) => ({ ...r, [slot.key]: 'reading' }))
     try {
       let fields
+      // The resume slot has no type check to fail — it is a resume by
+      // definition, so reading it at all is confirmation enough.
+      let verified = slot.read.kind === 'resume'
       if (slot.read.kind === 'resume') {
         const res = await api.parseResume(token, withFile('resume', file))
         setResumePreview(res)
@@ -245,12 +248,20 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
         if (res.check?.warnings?.length) {
           setSlotWarnings((w) => ({ ...w, [slot.key]: res.check.warnings }))
         }
+        // A green tick has to mean "this is the right document", not "OCR
+        // returned something". A resume in the Aadhaar slot yields a name
+        // quite happily, and reporting that as ✅ read is how one got waved
+        // through.
+        verified = res.check?.status === 'OK'
         fields = res.fields
       }
       const patch = toFormPatch(slot.key, fields)
       const anything = Object.values(patch).some((v) => v !== '' && v !== false && v != null)
       mergeBlanks(patch)
-      setReading((r) => ({ ...r, [slot.key]: anything ? 'done' : 'none' }))
+      setReading((r) => ({
+        ...r,
+        [slot.key]: verified ? 'verified' : anything ? 'unverified' : 'none',
+      }))
     } catch {
       // A failed read is never fatal — those fields are simply typed by hand.
       setReading((r) => ({ ...r, [slot.key]: 'error' }))
@@ -588,7 +599,9 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
 
 const STATUS_LABEL = {
   reading: { text: '⏳ reading…', tone: 'amber' },
-  done: { text: '✅ read', tone: 'green' },
+  // Green is reserved for a document that was confirmed to be the right type.
+  verified: { text: '✅ verified', tone: 'green' },
+  unverified: { text: '⚠ read, not verified', tone: 'amber' },
   none: { text: '— nothing readable', tone: 'grey' },
   error: { text: '⚠ could not read', tone: 'amber' },
 }

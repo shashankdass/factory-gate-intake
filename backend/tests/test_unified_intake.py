@@ -191,6 +191,35 @@ def test_a_wrong_document_in_the_aadhaar_slot_is_refused(as_contractor, today,
     assert not Worker.objects.filter(aadhar_number="100000000042").exists()
 
 
+def test_the_us_resume_that_got_through_is_refused_at_submit(as_contractor, today,
+                                                             requirements, settings):
+    """Regression: this exact file was accepted and stored as identity evidence.
+
+    The browser check is a convenience; this is the one that actually protects
+    the record, so it gets its own test rather than relying on the unit test.
+    """
+    settings.VERIFY_DOCUMENT_TYPES = "aadhaar"
+    resume_text = (
+        "John Doe\nGeneral Laborer\n10042 Main St.\nFresno, Ca 93730\n"
+        "(408) 000 0000\nstudent@gmail.com\n\nSKILLS\n"
+        "Familiar with fundamental construction processes, demolition, carpentry "
+        "and plumbing.\nCan safely and effectively drive a bobcat for drilling "
+        "and excavation\nKnowledgeable of Safety Data Sheet hazards and state "
+        "requirements/regulations\nEnergetic laborer willing to work overtime"
+    )
+    payload = _payload(today)
+    payload["aadhaar_file"] = SimpleUploadedFile(
+        "Resume-Template-General-Labor.pdf", resume_text.encode(), "application/pdf"
+    )
+
+    with patch("intake.ocr.extract_fields", return_value=({}, "stub", None, resume_text)):
+        response = as_contractor.post(ONBOARD_URL, payload, format="multipart")
+
+    assert response.status_code == 400
+    assert response.json()["document_check"]["status"] == "MISMATCH"
+    assert not Worker.objects.filter(aadhar_number="100000000042").exists()
+
+
 def test_an_unreadable_scan_is_never_refused(as_contractor, today, requirements,
                                              settings):
     """Field reality: bad light and dead OCR providers must not block intake."""

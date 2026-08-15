@@ -12,15 +12,26 @@ document and rarely elsewhere) and, where one exists, a **structural identifier*
 compare the score for the slot the user chose against the best-scoring
 alternative.
 
-The decision rule is deliberately asymmetric:
+The decision rule is deliberately asymmetric. There are two ways to fail:
 
-    reject ONLY on positive evidence of a *different* document type.
+1. **Positive evidence of a different document type** — the page scores higher
+   as a resume than as the Aadhaar card the slot expects.
 
-Absence of evidence is never a rejection. A phone photo taken in bad light, a
-scanned page with no text layer, an OCR provider that is down or rate-limited —
-all produce little or no text, and blocking those would make the whole intake
-unusable in exactly the field conditions this product exists for. Those cases
-return ``UNVERIFIED`` and the upload proceeds with a note.
+2. **A readable page missing the mark that defines the type.** Only applies to
+   documents that have such a mark: an Aadhaar card always carries a 12-digit
+   number or UIDAI markings, a cheque always names a bank. If OCR returned a
+   wall of clean text and none of it appears, the document has been read and it
+   is not what the slot expects. This is the one place absence counts, and it
+   is gated on ``MIN_DEFINING_TEXT`` so it can only trigger when we know OCR
+   worked. Free-form documents — medical, police, safety certificates — have no
+   universal mark and are exempt.
+
+Everything else is ``UNVERIFIED``, which does not block. A phone photo taken in
+bad light, a scanned page with no text layer, an OCR provider that is down or
+rate-limited all produce little or no text, and blocking those would make the
+intake unusable in exactly the field conditions this product exists for. A
+false rejection strands a worker at the gate; a false acceptance is caught by
+the reviewer looking at the thumbnail.
 
 Identifier checks (Aadhaar's Verhoeff checksum, PAN and IFSC formats) contribute
 *positive* signal only. A failing checksum is surfaced as a warning rather than a
@@ -41,6 +52,10 @@ PAN_RE = re.compile(r"\b([A-Z]{5}[0-9]{4}[A-Z])\b")
 IFSC_RE = re.compile(r"\b([A-Z]{4}0[A-Z0-9]{6})\b")
 # Bank account numbers run 9-18 digits; anything shorter collides with dates.
 ACCOUNT_RE = re.compile(r"\b(\d{9,18})\b")
+# An email address. No ID card, cheque or certificate carries one; a resume
+# almost always does. Weak on its own, which is why it is scored as one
+# pattern among the section headings rather than as defining evidence.
+EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 
 # --- Verhoeff checksum, the scheme Aadhaar numbers use ---------------------
 _D = [
@@ -103,6 +118,28 @@ class Signature:
     # Phrases that all but rule the type out when present.
     negative: tuple[str, ...] = ()
 
+    # --- Defining evidence -------------------------------------------------
+    # Marks that *every* genuine instance of this document carries: the issuing
+    # authority's name, or the identifier the document exists to convey. Only
+    # set for documents that have such a thing — an Aadhaar card always bears a
+    # 12-digit number, a medical certificate has no universal equivalent.
+    #
+    # When the page read cleanly and none of this appears, the document is not
+    # this type. That is the one situation where absence *is* evidence: we know
+    # OCR worked, because it returned plenty of text.
+    defining: tuple[str, ...] = ()
+    defining_patterns: tuple[re.Pattern, ...] = ()
+    # What to tell the contractor was missing.
+    missing_hint: str = ""
+
+    def has_defining_evidence(self, lowered: str, upper: str) -> bool:
+        if not self.defining and not self.defining_patterns:
+            return True  # no universal mark to look for; rule does not apply
+        return (
+            any(mark in lowered for mark in self.defining)
+            or any(p.search(upper) for p in self.defining_patterns)
+        )
+
 
 SIGNATURES: dict[str, Signature] = {
     "AADHAAR": Signature(
@@ -114,6 +151,12 @@ SIGNATURES: dict[str, Signature] = {
         ),
         patterns=(AADHAAR_RE,),
         negative=("curriculum vitae", "permanent account number"),
+        defining=(
+            "aadhaar", "aadhar", "आधार", "uidai", "unique identification",
+            "government of india", "भारत सरकार",
+        ),
+        defining_patterns=(AADHAAR_RE,),
+        missing_hint="no Aadhaar number and no UIDAI or Government of India markings",
     ),
     "PAN": Signature(
         label="PAN card",
@@ -123,6 +166,9 @@ SIGNATURES: dict[str, Signature] = {
         ),
         patterns=(PAN_RE,),
         negative=("curriculum vitae",),
+        defining=("permanent account number", "income tax department", "pan"),
+        defining_patterns=(PAN_RE,),
+        missing_hint="no PAN number and no Income Tax Department markings",
     ),
     "BANK": Signature(
         label="cancelled cheque or passbook",
@@ -132,6 +178,12 @@ SIGNATURES: dict[str, Signature] = {
             "current account", "pay to", "or bearer",
         ),
         patterns=(IFSC_RE,),
+        defining=(
+            "ifsc", "micr", "a/c", "account", "bank", "passbook", "cheque",
+            "branch",
+        ),
+        defining_patterns=(IFSC_RE,),
+        missing_hint="no account number, IFSC or bank name",
     ),
     "MEDICAL": Signature(
         label="medical fitness report",
@@ -160,11 +212,20 @@ SIGNATURES: dict[str, Signature] = {
     "RESUME": Signature(
         label="resume",
         markers=(
-            "curriculum vitae", "resume", "career objective", "objective",
-            "work experience", "professional experience", "educational qualification",
-            "education", "key skills", "declaration", "i hereby declare",
-            "references", "employment history",
+            # Indian conventions
+            "curriculum vitae", "career objective", "educational qualification",
+            "declaration", "i hereby declare", "father's name",
+            # Section headings any resume uses, wherever it was written. The
+            # first list was India-only, which let an ordinary US template
+            # through with a score of zero.
+            "resume", "objective", "summary", "profile", "skills",
+            "experience", "work experience", "professional experience",
+            "employment", "employment history", "education", "qualifications",
+            "certifications", "achievements", "projects", "references",
+            "responsibilities", "linkedin.com/in", "willing to work",
+            "years of experience", "proficient in", "familiar with",
         ),
+        patterns=(EMAIL_RE,),
     ),
 }
 
@@ -189,6 +250,11 @@ MIN_CONFIDENT_SCORE = 3
 REJECT_MARGIN = 2
 # Fewer characters than this and OCR effectively failed — never judge on it.
 MIN_TEXT_LENGTH = 40
+# Above this much clean text, OCR demonstrably worked — so a defining mark
+# being absent is a fact about the document, not about the scan. Deliberately
+# well above MIN_TEXT_LENGTH: a half-legible ID card can lose its markings, and
+# five lines of text is not enough to conclude anything from a silence.
+MIN_DEFINING_TEXT = 200
 
 
 def score_text(text: str) -> dict[str, int]:
@@ -282,6 +348,31 @@ def check_document(slot: str, text: str, fields: dict | None = None) -> Document
     expected_score = scores.get(expected, 0)
     others = {k: v for k, v in scores.items() if k != expected}
     best_other, best_other_score = max(others.items(), key=lambda kv: kv[1], default=(None, 0))
+
+    # The page read cleanly but carries none of the marks this document type is
+    # defined by. Below MIN_DEFINING_TEXT we stay silent — a part-legible scan
+    # can lose them — but a wall of readable text that never says "Aadhaar" and
+    # shows no 12-digit number is not an Aadhaar card, whatever else it is.
+    signature = SIGNATURES[expected]
+    if (
+        len(stripped) >= MIN_DEFINING_TEXT
+        and not signature.has_defining_evidence(stripped.lower(), stripped.upper())
+    ):
+        found = SIGNATURES[best_other].label if (
+            best_other and best_other_score >= MIN_CONFIDENT_SCORE
+        ) else None
+        wanted = signature.label
+        message = (
+            f"This looks like {_article(found)} {found}, not "
+            f"{_article(wanted)} {wanted}."
+            if found
+            else f"This does not look like {_article(wanted)} {wanted} — "
+            f"{signature.missing_hint}."
+        )
+        return DocumentCheck(
+            "MISMATCH", expected, best_other if found else None,
+            f"{message} Attach the right document.", scores, warnings,
+        )
 
     if expected_score >= MIN_CONFIDENT_SCORE and expected_score >= best_other_score:
         label = SIGNATURES[expected].label
