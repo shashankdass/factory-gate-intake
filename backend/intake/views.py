@@ -61,6 +61,7 @@ from .models import (
     IntakeMedicalRecord,
     IntakePoliceVerification,
     Project,
+    ProjectRequirement,
     RequirementMaster,
     SafetyTrainingProgress,
     Skill,
@@ -282,6 +283,89 @@ def project_detail(request, pk):
         Project.objects.prefetch_related("project_requirements__requirement"), pk=pk
     )
     return Response(ProjectSerializer(project).data)
+
+
+class ProjectRequirementsView(APIView):
+    """
+    PUT /api/projects/<id>/requirements/   (Contractor on the project, or its PE)
+
+    Body: ``{"requirement_ids": [1, 3]}`` — replaces the project's mandatory set.
+
+    This is the compliance bar every worker on the project is measured against,
+    so dropping one here makes previously-blocked workers deployable. The change
+    is recorded against the user who made it and shown to the Principal Employer
+    on review; it is never silent.
+    """
+
+    def put(self, request, pk):
+        denied = _require_role(
+            request, User.Role.CONTRACTOR, User.Role.PRINCIPAL_EMPLOYER
+        )
+        if denied:
+            return denied
+
+        project = get_object_or_404(Project, pk=pk)
+        if request.user.role == User.Role.CONTRACTOR:
+            if not project.contractors.filter(pk=request.user.pk).exists():
+                return Response(
+                    {"detail": "You are not assigned to this project."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+        elif project.principal_employer_id != request.user.id:
+            return Response(
+                {"detail": "You can only change your own projects."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        raw = request.data.get("requirement_ids")
+        if not isinstance(raw, list):
+            return Response(
+                {"detail": "requirement_ids must be a list (it may be empty)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        wanted = set(
+            RequirementMaster.objects.filter(id__in=raw).values_list("id", flat=True)
+        )
+        unknown = {int(r) for r in raw if str(r).isdigit()} - wanted
+        if unknown:
+            return Response(
+                {"detail": f"Unknown requirement id(s): {sorted(unknown)}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            existing = {
+                pr.requirement_id: pr
+                for pr in project.project_requirements.select_for_update()
+            }
+
+            # Waive rather than delete. Deleting the row would erase the fact
+            # that the requirement ever applied — and removal is the direction
+            # that *lowers* the bar, so it is exactly the change that must stay
+            # visible. Compliance only counts is_mandatory=True, so a waived row
+            # stops blocking while remaining on the record.
+            for rid, pr in existing.items():
+                should_be = rid in wanted
+                if pr.is_mandatory != should_be:
+                    pr.is_mandatory = should_be
+                    pr.updated_by = request.user
+                    pr.save(update_fields=["is_mandatory", "updated_by", "updated_at"])
+
+            for rid in wanted - set(existing):
+                ProjectRequirement.objects.create(
+                    project=project, requirement_id=rid, is_mandatory=True,
+                    updated_by=request.user,
+                )
+
+        project.refresh_from_db()
+        return Response(
+            ProjectSerializer(
+                Project.objects.prefetch_related(
+                    "project_requirements__requirement"
+                ).get(pk=project.pk)
+            ).data
+        )
 
 
 class EligibleWorkersView(APIView):

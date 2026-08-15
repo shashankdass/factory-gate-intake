@@ -62,10 +62,14 @@ class RequirementMasterSerializer(serializers.ModelSerializer):
 
 class ProjectRequirementSerializer(serializers.ModelSerializer):
     requirement = RequirementMasterSerializer(read_only=True)
+    # Who last changed the compliance bar, so the PE can see it was moved.
+    updated_by_email = serializers.CharField(
+        source="updated_by.email", read_only=True, default=None
+    )
 
     class Meta:
         model = ProjectRequirement
-        fields = ["id", "requirement", "is_mandatory"]
+        fields = ["id", "requirement", "is_mandatory", "updated_by_email", "updated_at"]
 
 
 class ProjectSerializer(serializers.ModelSerializer):

@@ -156,22 +156,32 @@ def approved_list(db, project, contractor, compliant_worker):
 
 @pytest.fixture
 def api():
+    """An unauthenticated client."""
     return APIClient()
 
 
-@pytest.fixture
-def as_contractor(api, contractor):
-    api.force_authenticate(user=contractor)
-    return api
+def _as(user):
+    """A client authenticated as one user.
+
+    Each persona gets its OWN client. Sharing one and re-authenticating it meant
+    that in any test requesting two personas, the last fixture resolved silently
+    won — so a call written as the contractor actually ran as the PE.
+    """
+    client = APIClient()
+    client.force_authenticate(user=user)
+    return client
 
 
 @pytest.fixture
-def as_pe(api, pe):
-    api.force_authenticate(user=pe)
-    return api
+def as_contractor(contractor):
+    return _as(contractor)
 
 
 @pytest.fixture
-def as_gate(api, gate):
-    api.force_authenticate(user=gate)
-    return api
+def as_pe(pe):
+    return _as(pe)
+
+
+@pytest.fixture
+def as_gate(gate):
+    return _as(gate)

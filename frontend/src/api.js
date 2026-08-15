@@ -46,6 +46,12 @@ export const api = {
   // Projects (read-only — configuration was removed from the PE dashboard)
   projects: (token) => request('/projects/', { token }),
   project: (token, id) => request(`/projects/${id}/`, { token }),
+  setProjectRequirements: (token, projectId, requirementIds) =>
+    request(`/projects/${projectId}/requirements/`, {
+      method: 'PUT',
+      body: { requirement_ids: requirementIds },
+      token,
+    }),
   eligibleWorkers: (token, projectId, contractorId) =>
     request(
       `/projects/${projectId}/eligible-workers/${

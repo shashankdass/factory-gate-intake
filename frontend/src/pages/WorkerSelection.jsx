@@ -292,15 +292,15 @@ export default function WorkerSelection() {
           </div>
 
           {project && (
-            <div className="requirements-strip">
-              <strong>Required documents:</strong>{' '}
-              {project.requirements.map((r) => (
-                <span key={r.id} className="pill">
-                  {r.requirement.name}
-                  {r.requirement.is_expirable ? ' ⏳' : ''}
-                </span>
-              ))}
-            </div>
+            <RequiredDocuments
+              project={project}
+              masterReqs={masterReqs}
+              token={token}
+              onChanged={(updated) => {
+                setProjects((ps) => ps.map((p) => (p.id === updated.id ? updated : p)))
+                loadEligible(updated.id)
+              }}
+            />
           )}
 
           <div className="tabs sub">
@@ -405,6 +405,124 @@ export default function WorkerSelection() {
         onClose={() => setOverlayOpen(false)}
         onCreated={refreshAll}
       />
+    </div>
+  )
+}
+
+// The project's mandatory document set — the bar every worker on it is measured
+// against. The contractor can change it, so removing one is a confirmed action
+// and the change is attributed to them for the Employer to see.
+function RequiredDocuments({ project, masterReqs, token, onChanged }) {
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState(null)
+  const [adding, setAdding] = useState(false)
+
+  // A removed requirement is waived, not deleted — it stays on the record so
+  // the Employer can see the bar was lowered and by whom.
+  const active = project.requirements.filter((r) => r.is_mandatory)
+  const waived = project.requirements.filter((r) => !r.is_mandatory)
+  const currentIds = active.map((r) => r.requirement.id)
+  const available = masterReqs.filter((m) => !currentIds.includes(m.id))
+
+  async function apply(ids, verb) {
+    setBusy(true)
+    setErr(null)
+    try {
+      onChanged(await api.setProjectRequirements(token, project.id, ids))
+    } catch (e) {
+      setErr(`Could not ${verb} the requirement: ${e.message}`)
+    } finally {
+      setBusy(false)
+      setAdding(false)
+    }
+  }
+
+  function remove(entry) {
+    const name = entry.requirement.name
+    if (
+      !window.confirm(
+        `Remove "${name}" from ${project.name}?\n\n` +
+          `Every worker on this project stops being checked for it, so some may ` +
+          `become deployable immediately. The change is recorded against you.`
+      )
+    )
+      return
+    apply(currentIds.filter((id) => id !== entry.requirement.id), 'remove')
+  }
+
+  return (
+    <div className="requirements-strip">
+      <strong>Required documents:</strong>{' '}
+      {active.map((r) => (
+        <span key={r.id} className="pill removable">
+          {r.requirement.name}
+          {r.requirement.is_expirable ? ' ⏳' : ''}
+          <button
+            className="pill-x"
+            disabled={busy}
+            title={`Remove ${r.requirement.name} from this project`}
+            aria-label={`Remove ${r.requirement.name}`}
+            onClick={() => remove(r)}
+          >
+            ✕
+          </button>
+        </span>
+      ))}
+
+      {active.length === 0 && (
+        <span className="muted">None — only the intake pillars are checked.</span>
+      )}
+
+      {available.length > 0 &&
+        (adding ? (
+          <select
+            className="req-add"
+            autoFocus
+            defaultValue=""
+            disabled={busy}
+            onChange={(e) =>
+              e.target.value && apply([...currentIds, Number(e.target.value)], 'add')
+            }
+            onBlur={() => setAdding(false)}
+          >
+            <option value="">— pick a document —</option>
+            {available.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <button className="btn small ghost" disabled={busy} onClick={() => setAdding(true)}>
+            + Add
+          </button>
+        ))}
+
+      {waived.length > 0 && (
+        <div className="req-waived">
+          <span className="muted">Waived:</span>{' '}
+          {waived.map((r) => (
+            <span key={r.id} className="pill waived" title={
+              r.updated_by_email
+                ? `Removed by ${r.updated_by_email}`
+                : 'No longer required'
+            }>
+              {r.requirement.name}
+              <button
+                className="pill-x restore"
+                disabled={busy}
+                title={`Require ${r.requirement.name} again`}
+                aria-label={`Restore ${r.requirement.name}`}
+                onClick={() => apply([...currentIds, r.requirement.id], 'restore')}
+              >
+                ↺
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {err && <div className="inline-msg error">{err}</div>}
     </div>
   )
 }

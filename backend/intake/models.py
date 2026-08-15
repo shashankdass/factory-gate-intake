@@ -124,7 +124,13 @@ class Project(models.Model):
 
 
 class ProjectRequirement(models.Model):
-    """Junction: which requirements a given project demands."""
+    """Junction: which requirements a given project demands.
+
+    Contractors can edit this set, which means they can lower the bar their own
+    workers are measured against. That is a deliberate product decision, so the
+    change is **attributed** rather than silent: who last touched it and when
+    travel with the row and are shown to the Principal Employer at review.
+    """
 
     project = models.ForeignKey(
         Project, on_delete=models.CASCADE, related_name="project_requirements"
@@ -133,6 +139,14 @@ class ProjectRequirement(models.Model):
         RequirementMaster, on_delete=models.CASCADE, related_name="in_projects"
     )
     is_mandatory = models.BooleanField(default=True)
+    updated_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="requirement_changes",
+    )
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "project_requirements"

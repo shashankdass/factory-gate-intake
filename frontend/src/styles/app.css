@@ -1621,3 +1621,62 @@ textarea {
   color: var(--red);
   font-weight: 600;
 }
+
+/* --- Editable project requirement pills ---------------------------------- */
+.pill.removable {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 5px;
+}
+.pill-x {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  opacity: 0.55;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 3px;
+  border-radius: 4px;
+}
+.pill-x:hover:not(:disabled) {
+  opacity: 1;
+  background: rgba(220, 38, 38, 0.12);
+  color: var(--red);
+}
+.pill-x:disabled {
+  cursor: default;
+  opacity: 0.3;
+}
+.req-add {
+  margin-left: 6px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+/* Waived requirements stay visible — a lowered bar should not just vanish. */
+.req-waived {
+  margin-top: 8px;
+  font-size: 13px;
+}
+.pill.waived {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 5px;
+  background: #f1f5f9;
+  color: var(--muted);
+  border-color: var(--border);
+  text-decoration: line-through;
+}
+.pill-x.restore {
+  text-decoration: none;
+  font-size: 13px;
+}
+.pill-x.restore:hover:not(:disabled) {
+  background: rgba(5, 150, 105, 0.12);
+  color: var(--green);
+}

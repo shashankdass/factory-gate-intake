@@ -15,6 +15,7 @@ vi.mock('../api', () => ({
     verificationStatus: vi.fn(),
     workforceDemand: vi.fn(),
     submitList: vi.fn(),
+    setProjectRequirements: vi.fn(),
     updateList: vi.fn(),
     verifyDocumentForm: vi.fn(),
     deleteWorker: vi.fn(),
@@ -31,8 +32,24 @@ const PROJECT = {
   id: 1,
   name: 'Plant-A Turnaround',
   requirements: [
-    { id: 1, requirement: { id: 1, name: 'Aadhar', is_expirable: false } },
-    { id: 2, requirement: { id: 3, name: 'Safety Training', is_expirable: true } },
+    {
+      id: 1,
+      is_mandatory: true,
+      updated_by_email: null,
+      requirement: { id: 1, name: 'Aadhar', is_expirable: false },
+    },
+    {
+      id: 2,
+      is_mandatory: true,
+      updated_by_email: null,
+      requirement: { id: 3, name: 'Safety Training', is_expirable: true },
+    },
+    {
+      id: 3,
+      is_mandatory: false,
+      updated_by_email: 'contractor.one@vendor.com',
+      requirement: { id: 2, name: 'PAN', is_expirable: false },
+    },
   ],
 }
 
@@ -100,6 +117,7 @@ describe('WorkerSelection (Contractor Suite)', () => {
       lines: [],
     }))
     api.submitList.mockImplementation(async () => ({ id: 42 }))
+    api.setProjectRequirements.mockImplementation(async () => PROJECT)
   })
 
   it('opens on the workforce-demand tab', async () => {
@@ -175,6 +193,60 @@ describe('WorkerSelection (Contractor Suite)', () => {
     expect(await screen.findByText('PAN', { selector: '.gap-name' })).toBeInTheDocument()
     // Pillar gap: pointer to the workbench, no upload control.
     expect(screen.getByText(/resolve this in the verification & testing tab/i)).toBeInTheDocument()
+  })
+
+  it('lets the contractor remove a required document, after confirming', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    renderWithAuth(<WorkerSelection />)
+    await user.click(screen.getByRole('button', { name: /worker pool/i }))
+    await screen.findByText('Ravi Kumar')
+
+    await user.click(screen.getByRole('button', { name: /remove safety training/i }))
+
+    await waitFor(() =>
+      expect(api.setProjectRequirements).toHaveBeenCalledWith('test-token', 1, [1])
+    )
+  })
+
+  it('warns what removing a requirement does before doing it', async () => {
+    const user = userEvent.setup()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    renderWithAuth(<WorkerSelection />)
+    await user.click(screen.getByRole('button', { name: /worker pool/i }))
+    await screen.findByText('Ravi Kumar')
+
+    await user.click(screen.getByRole('button', { name: /remove aadhar/i }))
+
+    expect(confirmSpy.mock.calls[0][0]).toMatch(/stops being checked/i)
+    expect(confirmSpy.mock.calls[0][0]).toMatch(/recorded against you/i)
+    expect(api.setProjectRequirements).not.toHaveBeenCalled()
+  })
+
+  it('keeps a waived requirement visible rather than vanishing it', async () => {
+    const user = userEvent.setup()
+    renderWithAuth(<WorkerSelection />)
+    await user.click(screen.getByRole('button', { name: /worker pool/i }))
+    await screen.findByText('Ravi Kumar')
+
+    // PAN is waived: shown under "Waived", not among the required pills.
+    expect(screen.getByText(/waived:/i)).toBeInTheDocument()
+    const waived = document.querySelector('.pill.waived')
+    expect(waived).toHaveTextContent('PAN')
+    expect(waived).toHaveAttribute('title', expect.stringMatching(/removed by contractor/i))
+  })
+
+  it('can restore a waived requirement', async () => {
+    const user = userEvent.setup()
+    renderWithAuth(<WorkerSelection />)
+    await user.click(screen.getByRole('button', { name: /worker pool/i }))
+    await screen.findByText('Ravi Kumar')
+
+    await user.click(screen.getByRole('button', { name: /restore pan/i }))
+
+    await waitFor(() =>
+      expect(api.setProjectRequirements).toHaveBeenCalledWith('test-token', 1, [1, 3, 2])
+    )
   })
 
   it('opens the unified intake overlay', async () => {
