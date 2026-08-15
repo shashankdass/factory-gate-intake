@@ -66,6 +66,16 @@ const SLOTS = [
     fills: 'name and trade',
     read: { kind: 'resume' },
   },
+  {
+    key: 'photo_file',
+    label: 'Worker photo',
+    hint: 'Optional — a face for the record',
+    fills: null,
+    // Nothing to read off a face. The server still checks it is an image, so a
+    // PDF dropped here is refused like any other wrong document.
+    read: null,
+    accept: 'image/*',
+  },
 ]
 
 const EMPTY = {
@@ -337,7 +347,10 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
     form.skill_type.trim() &&
     form.aadhar_number.length === 12 &&
     aadhaarAttached
-  const attached = Object.values(files).filter(Boolean).length
+  // The photo is not a document and is left out of the count, so attaching one
+  // does not read as progress toward the paperwork.
+  const DOC_SLOTS = SLOTS.filter((s) => s.key !== 'photo_file')
+  const attached = DOC_SLOTS.filter((s) => files[s.key]).length
   const anyReading = Object.values(reading).some((s) => s === 'reading')
 
   return (
@@ -572,7 +585,7 @@ export default function UnifiedIntakeOverlay({ open, onClose, onCreated }) {
         {!done && (
           <footer className="ui-foot">
             <span className="muted">
-              {attached} of {SLOTS.length} documents attached
+              {attached} of {DOC_SLOTS.length} documents attached
               {anyReading ? ' · reading…' : ''}
               {!aadhaarAttached && (
                 <span className="ui-required-note"> · Aadhaar card required</span>
@@ -614,7 +627,7 @@ function FileSlot({ slot, file, status, preview, error, warnings, onPick }) {
       <input
         ref={inputRef}
         type="file"
-        accept="image/*,application/pdf"
+        accept={slot.accept || 'image/*,application/pdf'}
         hidden
         onChange={(e) => onPick(e.target.files?.[0])}
       />

@@ -17,6 +17,7 @@ const ROWS = [
     name: 'Ravi Kumar',
     skill_type: 'Carpenter',
     aadhar_number: '100000000001',
+    photo_url: 'https://signed.example/photo.jpg?token=xyz',
     items: [
       item('Aadhar', 'VERIFIED', 'https://signed.example/aadhaar?token=abc'),
       item('PAN', 'VERIFIED'),
@@ -35,6 +36,7 @@ const ROWS = [
     name: 'Deepak Singh',
     skill_type: 'Fitter',
     aadhar_number: '100000000005',
+    photo_url: null,
     items: [
       item('Aadhar', 'VERIFIED'),
       item('PAN', 'REJECTED'),
@@ -151,5 +153,40 @@ describe('VerificationStatusTable', () => {
 
     const row = (await screen.findByText('Deepak Singh')).closest('tr')
     expect(within(row).getByText('✖ Expired')).toBeInTheDocument()
+  })
+})
+
+describe('worker photo', () => {
+  beforeEach(() => {
+    api.verificationStatus.mockReset()
+    api.verificationStatus.mockImplementation(async () => ROWS)
+  })
+
+  it('shows the photo when there is one, linked to the full size', async () => {
+    renderWithAuth(<VerificationStatusTable />)
+
+    const photo = await screen.findByAltText('Ravi Kumar')
+    expect(photo).toHaveAttribute('src', 'https://signed.example/photo.jpg?token=xyz')
+    expect(photo.closest('a')).toHaveAttribute(
+      'href',
+      'https://signed.example/photo.jpg?token=xyz'
+    )
+  })
+
+  it('falls back to a placeholder rather than a broken image', async () => {
+    renderWithAuth(<VerificationStatusTable />)
+
+    await screen.findByText('Deepak Singh')
+    // No <img> for the worker who has no photo.
+    expect(screen.queryByAltText('Deepak Singh')).not.toBeInTheDocument()
+    expect(document.querySelectorAll('.vs-photo.none')).toHaveLength(1)
+  })
+
+  it('does not treat a missing photo as an outstanding verification', async () => {
+    renderWithAuth(<VerificationStatusTable />)
+
+    const row = (await screen.findByText('Deepak Singh')).closest('tr')
+    // Seven remaining, exactly as the payload says — the photo is not counted.
+    expect(within(row).getByText('7 remaining')).toBeInTheDocument()
   })
 })

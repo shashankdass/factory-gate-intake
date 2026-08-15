@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { renderWithAuth } from '../../test/renderWithAuth.jsx'
@@ -540,5 +540,52 @@ describe('toFormPatch', () => {
   it('tolerates an empty extraction', () => {
     expect(toFormPatch('aadhaar_file', {})).toEqual({ name: '', aadhar_number: '' })
     expect(toFormPatch('unknown_slot', { x: 1 })).toEqual({})
+  })
+})
+
+describe('worker photo slot', () => {
+  beforeEach(() => {
+    api.onboardWorker.mockReset()
+    api.onboardWorker.mockImplementation(async () => CREATED)
+    api.ocrExtract.mockReset()
+    api.ocrExtract.mockImplementation(async () => ({
+      fields: {},
+      provider: 'mock',
+      check: { status: 'OK', ok: true, message: 'ok', warnings: [] },
+    }))
+  })
+
+  it('offers an optional photo slot that is not read by OCR', async () => {
+    const user = userEvent.setup()
+    renderWithAuth(<UnifiedIntakeOverlay open onClose={vi.fn()} />)
+
+    const label = screen.getByText('Worker photo', { selector: '.ui-slot-label' })
+    expect(label).toBeInTheDocument()
+    // Not marked required — a worker with no photograph is still onboardable.
+    expect(within(label.closest('.ui-slot')).queryByText(/required/i)).toBeNull()
+
+    const png = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'face.png', {
+      type: 'image/png',
+    })
+    await attach(user, /worker photo/i, png)
+
+    // A face has no text to extract, so no OCR round trip is spent on it.
+    expect(api.ocrExtract).not.toHaveBeenCalled()
+  })
+
+  it('submits the photo alongside the documents', async () => {
+    const user = userEvent.setup()
+    renderWithAuth(<UnifiedIntakeOverlay open onClose={vi.fn()} />)
+
+    const png = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'face.png', {
+      type: 'image/png',
+    })
+    await attach(user, /worker photo/i, png)
+    await fillIdentity(user)
+    await user.click(submitButton())
+
+    await waitFor(() => expect(api.onboardWorker).toHaveBeenCalled())
+    const fd = api.onboardWorker.mock.calls[0][1]
+    expect(fd.get('photo_file')).toBe(png)
   })
 })

@@ -431,3 +431,85 @@ def test_verification_status_reports_every_pillar(as_contractor, compliant_worke
                     "TRADE_TEST", "SAFETY_VIDEO", "RESUME", "BANK"]
     # Everything verified except the resume and bank account.
     assert rows[0]["remaining"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Worker photo — optional, and never a compliance gap
+# ---------------------------------------------------------------------------
+_JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"\x00" * 64
+
+
+def _jpeg(name="worker.jpg"):
+    return SimpleUploadedFile(name, _JPEG, "image/jpeg")
+
+
+def test_a_photo_is_stored_and_surfaced_in_the_register(as_contractor, today,
+                                                        requirements):
+    payload = _payload(today)
+    payload["photo_file"] = _jpeg()
+
+    response = as_contractor.post(ONBOARD_URL, payload, format="multipart")
+    assert response.status_code == 201
+
+    worker = Worker.objects.get(aadhar_number="100000000042")
+    assert worker.photo_key
+
+    row = next(r for r in as_contractor.get("/api/verification-status/").json()
+               if r["id"] == worker.id)
+    assert row["photo_url"]
+
+
+def test_a_worker_without_a_photo_is_still_fully_compliant(as_contractor, today,
+                                                           requirements):
+    """Optional means optional: no photo must not cost a worker a day's work."""
+    response = as_contractor.post(ONBOARD_URL, _payload(today), format="multipart")
+    assert response.status_code == 201
+
+    worker = Worker.objects.get(aadhar_number="100000000042")
+    assert worker.photo_key == ""
+
+    row = next(r for r in as_contractor.get("/api/verification-status/").json()
+               if r["id"] == worker.id)
+    assert row["photo_url"] is None
+    # The photo is not a verification item and never counts as remaining.
+    assert not any(it["key"] == "PHOTO" for it in row["items"])
+
+
+def test_a_document_in_the_photo_slot_is_refused(as_contractor, today, requirements):
+    """The same mistake as a resume in the bank slot, in a new place."""
+    payload = _payload(today)
+    payload["photo_file"] = _pdf("Resume-Template-General-Labor.pdf")
+
+    response = as_contractor.post(ONBOARD_URL, payload, format="multipart")
+
+    assert response.status_code == 400
+    assert response.json()["slot"] == "photo"
+    assert "PDF" in response.json()["detail"]
+    assert not Worker.objects.filter(aadhar_number="100000000042").exists()
+
+
+def test_a_renamed_file_cannot_pass_as_a_photo(as_contractor, today, requirements):
+    """The browser derives image/jpeg from the extension; only bytes are trusted."""
+    payload = _payload(today)
+    payload["photo_file"] = SimpleUploadedFile(
+        "face.jpg", b"%PDF-1.4 this is not a photograph", "image/jpeg"
+    )
+
+    response = as_contractor.post(ONBOARD_URL, payload, format="multipart")
+
+    assert response.status_code == 400
+    assert response.json()["slot"] == "photo"
+
+
+def test_deleting_a_worker_removes_their_photo_from_the_bucket(as_contractor, today,
+                                                               requirements):
+    payload = _payload(today)
+    payload["photo_file"] = _jpeg()
+    as_contractor.post(ONBOARD_URL, payload, format="multipart")
+    worker = Worker.objects.get(aadhar_number="100000000042")
+    photo_key = worker.photo_key
+
+    with patch("intake.views.storage.delete") as delete:
+        as_contractor.delete(f"/api/workers/{worker.id}/")
+
+    assert photo_key in [c.args[0] for c in delete.call_args_list]

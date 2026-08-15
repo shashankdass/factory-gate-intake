@@ -401,6 +401,59 @@ def check_document(slot: str, text: str, fields: dict | None = None) -> Document
     )
 
 
+# ---------------------------------------------------------------------------
+# Photographs
+# ---------------------------------------------------------------------------
+# A face photo carries no text, so the scoring above cannot say anything about
+# it. What it *can* be checked for is being an image at all — which is enough to
+# keep a PDF resume out of the photo slot, the same mistake in a new place.
+#
+# Read from the bytes rather than the declared content type: the browser's guess
+# is derived from the file extension and a renamed file lies about both.
+_IMAGE_MAGIC = (
+    (b"\xff\xd8\xff", "JPEG"),
+    (b"\x89PNG\r\n\x1a\n", "PNG"),
+    (b"GIF87a", "GIF"),
+    (b"GIF89a", "GIF"),
+    (b"BM", "BMP"),
+)
+
+
+def image_kind(blob: bytes) -> str | None:
+    """The image format ``blob`` actually is, or None if it is not an image."""
+    if not blob:
+        return None
+    for magic, name in _IMAGE_MAGIC:
+        if blob.startswith(magic):
+            return name
+    # RIFF-wrapped (WebP) and ISO-BMFF (HEIC/HEIF, what iPhones produce) both
+    # name their format a few bytes in rather than at offset zero.
+    if blob[:4] == b"RIFF" and blob[8:12] == b"WEBP":
+        return "WebP"
+    if blob[4:8] == b"ftyp":
+        brand = blob[8:12]
+        if brand in (b"heic", b"heix", b"hevc", b"heim", b"heis", b"mif1", b"msf1"):
+            return "HEIC"
+        if brand in (b"avif", b"avis"):
+            return "AVIF"
+    return None
+
+
+def check_photo(blob: bytes) -> DocumentCheck:
+    """Is this a photograph, or a document that wandered into the photo slot?"""
+    kind = image_kind(blob)
+    if kind:
+        return DocumentCheck("OK", "PHOTO", "PHOTO", f"{kind} image.", {}, [])
+    looks_like_pdf = (blob or b"").startswith(b"%PDF")
+    what = "a PDF" if looks_like_pdf else "not an image"
+    return DocumentCheck(
+        "MISMATCH", "PHOTO", None,
+        f"The worker photo must be a photograph — this is {what}. "
+        "Attach a JPEG, PNG, WebP or HEIC.",
+        {}, [],
+    )
+
+
 def extract_bank_fields(text: str) -> dict:
     """Pull account number and IFSC off a cancelled cheque or passbook page."""
     upper = (text or "").upper()

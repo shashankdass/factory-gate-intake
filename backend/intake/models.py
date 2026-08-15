@@ -200,6 +200,12 @@ class Worker(models.Model):
         related_name="workers",
         limit_choices_to={"role": User.Role.CONTRACTOR},
     )
+    # A face photo, if the contractor has one. Optional: plenty of workers are
+    # onboarded from a stack of paperwork with no photograph in it, and a
+    # missing photo must never be a reason someone cannot work. Stored in the
+    # same private bucket as the documents and served as an expiring link.
+    photo_key = models.CharField(max_length=500, blank=True, default="")
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

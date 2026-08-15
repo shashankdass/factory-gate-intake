@@ -724,6 +724,8 @@ class WorkerDetailView(APIView):
         keys = [d.storage_key for d in worker.documents.all() if d.storage_key]
         keys += [m.storage_key for m in worker.medical_records.all() if m.storage_key]
         keys += [p.storage_key for p in worker.police_verifications.all() if p.storage_key]
+        if worker.photo_key:
+            keys.append(worker.photo_key)
         try:
             keys.append(worker.candidate_profile.resume_key)
         except CandidateProfile.DoesNotExist:
@@ -865,6 +867,10 @@ class VerificationStatusView(APIView):
                 "name": w.name,
                 "skill_type": w.skill_type,
                 "aadhar_number": w.aadhar_number,
+                # Optional, so this is null far more often than not. It is not a
+                # verification item and never counts toward `remaining` — a
+                # worker with no photograph is fully compliant.
+                "photo_url": storage.signed_url(w.photo_key) if w.photo_key else None,
                 "items": items,
                 "remaining": remaining,
                 "all_verified": remaining == 0,
@@ -1725,6 +1731,7 @@ class UnifiedIntakeView(APIView):
             ("pvc", "pvc_file", "intake_docs"),
             ("bank", "bank_file", "intake_docs"),
             ("resume", "resume_file", "resumes"),
+            ("photo", "photo_file", "worker_photos"),
         ]
         items, resume_pages = [], []
         for slot, field_name, prefix in slots:
@@ -1751,9 +1758,22 @@ class UnifiedIntakeView(APIView):
         # This is the check that actually keeps a resume out of the bank slot.
         # VERIFY_DOCUMENT_TYPES="aadhaar" narrows it to the identity document,
         # "none" skips it — both trade correctness for OCR spend.
+        # The photo is checked for being an image rather than being read: a face
+        # carries no text to score, but a PDF in the photo slot is the same
+        # mistake as a resume in the bank slot and is refused the same way.
+        photo_item = next((i for i in items if i["slot"] == "photo"), None)
+        if photo_item is not None:
+            verdict = doctype.check_photo(photo_item["data"])
+            if not verdict.ok:
+                return Response(
+                    {"detail": verdict.message, "document_check": verdict.as_dict(),
+                     "slot": "photo"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         policy = getattr(settings, "VERIFY_DOCUMENT_TYPES", "all").lower()
         if policy != "none":
-            to_check = [i for i in items if i["slot"] != "resume"]
+            to_check = [i for i in items if i["slot"] not in ("resume", "photo")]
             if policy != "all":
                 to_check = [i for i in to_check if i["slot"] == "aadhaar"]
             for item in to_check:
@@ -1786,6 +1806,7 @@ class UnifiedIntakeView(APIView):
                     aadhar_number=aadhar,
                     skill_type=skill,
                     contractor=request.user,
+                    photo_key=keys.get("photo", ""),
                 )
 
                 def identity_doc(requirement_name, slot, number="", expiry=None):

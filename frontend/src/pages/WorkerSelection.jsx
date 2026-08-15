@@ -23,7 +23,9 @@ const TABS = [
   // is for an existing worker: administer the trade test, play the safety video,
   // and re-verify a single document.
   { key: 'workbench', label: '🧾 Verification & Testing' },
-  { key: 'status', label: '✅ Verification Status' },
+  // Not a status readout so much as the register of who is on the books and
+  // what stands behind each of them — photo, documents, tests, expiry.
+  { key: 'status', label: '📋 Compliance Register' },
 ]
 
 // The Contractor Suite. Everything operational lives here now: the worker pool

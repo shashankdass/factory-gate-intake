@@ -335,3 +335,43 @@ def test_an_unknown_slot_is_not_treated_as_a_mismatch():
 
     assert verdict.ok is True
     assert verdict.status == "UNVERIFIED"
+
+
+# ---------------------------------------------------------------------------
+# The photo slot — no text to read, so the check is "is this an image at all"
+# ---------------------------------------------------------------------------
+JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"\x00" * 40
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 40
+WEBP = b"RIFF\x00\x00\x00\x00WEBPVP8 " + b"\x00" * 30
+HEIC = b"\x00\x00\x00\x18ftypheic" + b"\x00" * 30
+PDF = b"%PDF-1.4\n" + b"\x00" * 40
+
+
+@pytest.mark.parametrize(
+    "blob,kind",
+    [(JPEG, "JPEG"), (PNG, "PNG"), (WEBP, "WebP"), (HEIC, "HEIC")],
+)
+def test_a_photograph_is_accepted(blob, kind):
+    verdict = doctype.check_photo(blob)
+
+    assert verdict.status == "OK"
+    assert doctype.image_kind(blob) == kind
+
+
+def test_a_pdf_in_the_photo_slot_is_refused():
+    verdict = doctype.check_photo(PDF)
+
+    assert verdict.status == "MISMATCH"
+    assert "PDF" in verdict.message
+
+
+def test_an_empty_or_unrecognised_file_is_refused():
+    """Unlike OCR, this needs no interpretation: it either has the magic bytes
+    of an image or it does not, so there is no bad-light case to protect."""
+    assert doctype.check_photo(b"").status == "MISMATCH"
+    assert doctype.check_photo(b"just some text").status == "MISMATCH"
+
+
+def test_the_declared_content_type_is_not_trusted():
+    """A renamed resume claims image/jpeg. Only the bytes are consulted."""
+    assert doctype.image_kind(PDF) is None

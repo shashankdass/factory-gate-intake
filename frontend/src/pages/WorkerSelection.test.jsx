@@ -133,7 +133,7 @@ describe('WorkerSelection (Contractor Suite)', () => {
       /workforce demand/i,
       /worker pool/i,
       /verification & testing/i,
-      /verification status/i,
+      /compliance register/i,
     ]) {
       expect(screen.getByRole('button', { name: label })).toBeInTheDocument()
     }

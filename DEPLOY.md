@@ -131,7 +131,7 @@ If the names came through as-is, no changes are needed.
    - **Contractor** → *Worker Pool* → project *Plant-A* → *Fix Requirements*
      shows gaps; submit a list.
    - **Contractor** → **＋ New Worker Intake** → attach any PDF to a slot and
-     confirm the document lands (check *Verification Status* → 📎 opens a signed
+     confirm the document lands (check *Compliance Register* → 📎 opens a signed
      link).
    - **Principal Employer** → approve the list.
    - **Gate Security** → enter `100000000001` → **GREEN**; `100000000005` → **RED**.

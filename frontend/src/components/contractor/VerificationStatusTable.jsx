@@ -91,8 +91,9 @@ export default function VerificationStatusTable({ onChanged }) {
   return (
     <div>
       <p className="muted">
-        Every worker in your pool and the status of each verification type. Click 📎 to
-        open a document — links are short-lived and expire.
+        Every worker on your books, with their photo and the status of each
+        verification. Click a photo or 📎 to open the original — links are
+        short-lived and expire.
       </p>
 
       <div className="vs-toolbar">
@@ -135,9 +136,29 @@ export default function VerificationStatusTable({ onChanged }) {
               {filtered.map((row) => (
                 <tr key={row.id}>
                   <td className="vs-worker">
-                    <strong>{row.name}</strong>
-                    <div className="muted">
-                      {row.skill_type} · {row.aadhar_number}
+                    <div className="vs-identity">
+                      {/* Only shown when there is one. An absent photo is not a
+                          gap to be chased — it is simply not a thing we have. */}
+                      {row.photo_url ? (
+                        <a
+                          href={row.photo_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          title={`Photo of ${row.name} — open full size (link expires)`}
+                        >
+                          <img className="vs-photo" src={row.photo_url} alt={row.name} />
+                        </a>
+                      ) : (
+                        <span className="vs-photo none" aria-hidden="true">
+                          👤
+                        </span>
+                      )}
+                      <div>
+                        <strong>{row.name}</strong>
+                        <div className="muted">
+                          {row.skill_type} · {row.aadhar_number}
+                        </div>
+                      </div>
                     </div>
                   </td>
                   {COLUMNS.map((c) => {
