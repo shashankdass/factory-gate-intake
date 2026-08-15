@@ -71,14 +71,49 @@ class User(AbstractUser):
 # Requirements catalogue
 # ---------------------------------------------------------------------------
 class RequirementMaster(models.Model):
-    """A document type that a worker may be required to hold (Aadhar, PAN, ...)."""
+    """Something a worker may be required to have before they can be deployed.
+
+    Two kinds, deliberately in one table. A **document** is a scan the worker
+    holds (Aadhar, PAN, Safety Training certificate). A **pillar** is a state
+    the platform tracks itself — the medical, the police verification, the trade
+    test, the safety video, the resume.
+
+    The pillars used to be hard-coded and always blocking, which left the
+    contractor able to waive an Aadhaar card but not a trade test: the whole bar
+    in two places, with the more serious half of it unreachable. Putting both
+    kinds here means one catalogue, one ProjectRequirement row per entry, one
+    soft-waive with attribution, and one strip in the UI.
+    """
+
+    class Kind(models.TextChoices):
+        DOCUMENT = "DOCUMENT", "Document the worker holds"
+        PILLAR = "PILLAR", "Intake pillar the platform tracks"
+
+    class Pillar(models.TextChoices):
+        MEDICAL = "MEDICAL", "Medical Exam"
+        POLICE = "POLICE", "Police Verification"
+        TRADE_TEST = "TRADE_TEST", "Trade Test"
+        SAFETY_VIDEO = "SAFETY_VIDEO", "Safety Training Video"
+        RESUME = "RESUME", "Resume on file"
 
     name = models.CharField(max_length=120, unique=True)
     description = models.CharField(max_length=255, blank=True, default="")
+    kind = models.CharField(
+        max_length=10, choices=Kind.choices, default=Kind.DOCUMENT, db_index=True
+    )
+    # Set only on PILLAR rows; ties the catalogue entry to the check in
+    # _intake_status that evaluates it.
+    pillar_code = models.CharField(
+        max_length=20, choices=Pillar.choices, blank=True, default=""
+    )
     # Expirable requirements (e.g. Safety Training) are only "Verified" while the
     # attached document's expiry_date is still in the future.
     is_expirable = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    @property
+    def is_pillar(self) -> bool:
+        return self.kind == self.Kind.PILLAR
 
     class Meta:
         db_table = "requirements_master"
@@ -249,12 +284,25 @@ class Worker(models.Model):
         """
         today = timezone.now().date()
 
-        # Pull the project's mandatory requirements once.
-        required = list(
-            project.project_requirements.filter(is_mandatory=True).select_related(
-                "requirement"
-            )
-        )
+        # Pull the project's mandatory requirements once, then split them: the
+        # document rows drive the loop below, the pillar rows decide which of
+        # the intake checks block.
+        all_rows = list(project.project_requirements.select_related("requirement"))
+        required = [
+            pr for pr in all_rows
+            if pr.is_mandatory and not pr.requirement.is_pillar
+        ]
+        mandatory_pillars = {
+            pr.requirement.pillar_code
+            for pr in all_rows
+            if pr.is_mandatory and pr.requirement.is_pillar
+        }
+        # A project that has never had pillar rows written is not a project with
+        # nothing to check — it is a project that predates them. Falling through
+        # to "enforce none" would silently pass every worker, so an unconfigured
+        # project keeps the platform defaults.
+        if not any(pr.requirement.is_pillar for pr in all_rows):
+            mandatory_pillars = None
 
         # Index this worker's documents by requirement so lookups are O(1). A
         # worker can technically have more than one doc per requirement (e.g. a
@@ -295,11 +343,12 @@ class Worker(models.Model):
                     }
                 )
 
-        # Merge in the intake pillar checks (medical, police, trade test, safety
-        # video, resume). These are global to the worker, not project-specific,
-        # but a failure in any of them must also block deployment — so they
-        # surface as gaps here too.
-        intake_gaps, intake_satisfied, advisories = self._intake_status(today)
+        # Merge in the intake pillar checks. These are global to the worker
+        # rather than project-specific, but whether each one *blocks* is the
+        # project's call, exactly as it is for documents.
+        intake_gaps, intake_satisfied, advisories = self._intake_status(
+            today, mandatory_pillars
+        )
         gaps.extend(intake_gaps)
         satisfied.extend(intake_satisfied)
 
@@ -337,18 +386,49 @@ class Worker(models.Model):
             "evaluated_at": timezone.now().isoformat(),
         }
 
-    def _intake_status(self, today) -> tuple[list[dict], list[dict], list[dict]]:
+    def default_blocking_pillars(self) -> set[str]:
+        """Which pillars block when a project has not said otherwise.
+
+        The behaviour the platform had before pillars became waivable, kept as
+        the fallback so an unconfigured project is strict rather than empty.
+        """
+        pillars = {
+            RequirementMaster.Pillar.MEDICAL,
+            RequirementMaster.Pillar.POLICE,
+            RequirementMaster.Pillar.TRADE_TEST,
+            RequirementMaster.Pillar.SAFETY_VIDEO,
+        }
+        if getattr(settings, "REQUIRE_RESUME_FOR_COMPLIANCE", False):
+            pillars.add(RequirementMaster.Pillar.RESUME)
+        return set(pillars)
+
+    def _intake_status(
+        self, today, mandatory_pillars: set[str] | None = None
+    ) -> tuple[list[dict], list[dict], list[dict]]:
         """Evaluate the medical / police / trade-test / video / resume pillars.
+
+        ``mandatory_pillars`` names which of them block. Anything outside it is
+        still evaluated and still reported — as an *advisory* rather than a gap.
+        A waived pillar is not an unasked question: the contractor chose not to
+        gate on it, and can still see where their workers stand.
+
+        ``None`` means the caller has no project to ask, so the platform
+        defaults apply.
 
         Returns ``(gaps, satisfied, advisories)`` where each entry is a dict
         tagged with ``kind="intake"`` and a ``pillar`` so the UI can render an
         explanation (these have no uploadable document slot).
         """
+        if mandatory_pillars is None:
+            mandatory_pillars = self.default_blocking_pillars()
+
         gaps: list[dict] = []
         satisfied: list[dict] = []
         advisories: list[dict] = []
 
-        def add(pillar, name, ok, reason=None, detail="", blocking=True):
+        def add(pillar, name, ok, reason=None, detail="", blocking=None):
+            if blocking is None:
+                blocking = pillar in mandatory_pillars
             if ok:
                 satisfied.append({"pillar": pillar, "requirement_name": name})
                 return
@@ -418,23 +498,18 @@ class Worker(models.Model):
                 f"Safety induction video only {pct}% watched.")
 
         # --- Pillar 5: Resume on file (scanned + parsed candidate profile) ---
-        # Blocking only when REQUIRE_RESUME_FOR_COMPLIANCE is on; otherwise it is
-        # reported as an advisory so existing rosters stay deployable.
         try:
             profile = self.candidate_profile
         except CandidateProfile.DoesNotExist:
             profile = None
-        resume_required = getattr(settings, "REQUIRE_RESUME_FOR_COMPLIANCE", False)
         if profile is not None and profile.resume_key:
             add("RESUME", "Resume on file", True)
         elif profile is not None:
             add("RESUME", "Resume on file", False, "MISSING",
-                "A candidate profile exists but no resume document is stored.",
-                blocking=resume_required)
+                "A candidate profile exists but no resume document is stored.")
         else:
             add("RESUME", "Resume on file", False, "MISSING",
-                "No resume has been scanned for this worker.",
-                blocking=resume_required)
+                "No resume has been scanned for this worker.")
 
         return gaps, satisfied, advisories
 

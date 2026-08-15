@@ -910,6 +910,14 @@ class DocumentUploadView(APIView):
 
         worker = _owned_worker(request, worker_id)
         requirement = get_object_or_404(RequirementMaster, pk=requirement_id)
+        if requirement.is_pillar:
+            # Pillars are states the platform tracks, not slots a file goes in.
+            # Accepting an upload here would create a document nothing reads.
+            return Response(
+                {"detail": f"'{requirement.name}' is an intake pillar, not a "
+                           f"document — it has no upload slot."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # One document slot per (worker, requirement): update in place if present.
         doc, _created = WorkerDocument.objects.get_or_create(

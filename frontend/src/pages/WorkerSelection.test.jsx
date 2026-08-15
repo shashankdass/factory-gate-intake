@@ -50,6 +50,18 @@ const PROJECT = {
       updated_by_email: 'contractor.one@vendor.com',
       requirement: { id: 2, name: 'PAN', is_expirable: false },
     },
+    {
+      id: 4,
+      is_mandatory: true,
+      updated_by_email: null,
+      requirement: {
+        id: 10,
+        name: 'Trade Test',
+        is_expirable: false,
+        kind: 'PILLAR',
+        pillar_code: 'TRADE_TEST',
+      },
+    },
   ],
 }
 
@@ -205,7 +217,8 @@ describe('WorkerSelection (Contractor Suite)', () => {
     await user.click(screen.getByRole('button', { name: /remove safety training/i }))
 
     await waitFor(() =>
-      expect(api.setProjectRequirements).toHaveBeenCalledWith('test-token', 1, [1])
+      // Aadhar (1) and the Trade Test pillar (10) survive.
+      expect(api.setProjectRequirements).toHaveBeenCalledWith('test-token', 1, [1, 10])
     )
   })
 
@@ -245,7 +258,7 @@ describe('WorkerSelection (Contractor Suite)', () => {
     await user.click(screen.getByRole('button', { name: /restore pan/i }))
 
     await waitFor(() =>
-      expect(api.setProjectRequirements).toHaveBeenCalledWith('test-token', 1, [1, 3, 2])
+      expect(api.setProjectRequirements).toHaveBeenCalledWith('test-token', 1, [1, 3, 10, 2])
     )
   })
 
@@ -266,5 +279,62 @@ describe('WorkerSelection (Contractor Suite)', () => {
 
     expect(await screen.findByText(/document previewer/i)).toBeInTheDocument()
     expect(screen.getByText(/confirm & verify values/i)).toBeInTheDocument()
+  })
+})
+
+describe('intake pillars as requirements', () => {
+  const openPool = async (user) => {
+    renderWithAuth(<WorkerSelection />)
+    await user.click(screen.getByRole('button', { name: /worker pool/i }))
+    await screen.findByText('Ravi Kumar')
+  }
+
+  it('shows the checks the platform runs separately from the paperwork', async () => {
+    const user = userEvent.setup()
+    await openPool(user)
+
+    // Documents the worker hands over, and checks the platform tracks itself —
+    // mixing them hid why a fully-papered worker was still being held back.
+    expect(screen.getByText('Documents:')).toBeInTheDocument()
+    expect(screen.getByText('Checks:')).toBeInTheDocument()
+    expect(document.querySelector('.pill.pillar')).toHaveTextContent('Trade Test')
+  })
+
+  it('lets the contractor waive a pillar, not just a document', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    await openPool(user)
+
+    await user.click(screen.getByRole('button', { name: /remove trade test/i }))
+
+    // Aadhar (1) and Safety Training (3) survive; the trade test (10) is gone.
+    await waitFor(() =>
+      expect(api.setProjectRequirements).toHaveBeenCalledWith('test-token', 1, [1, 3])
+    )
+  })
+
+  it('warns about a pillar removal in the same terms as a document', async () => {
+    const user = userEvent.setup()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    await openPool(user)
+
+    await user.click(screen.getByRole('button', { name: /remove trade test/i }))
+
+    expect(confirmSpy.mock.calls[0][0]).toMatch(/stops being checked/i)
+    expect(confirmSpy.mock.calls[0][0]).toMatch(/recorded against you/i)
+  })
+
+  it('says plainly when nothing at all is required', async () => {
+    // The state that prompted this: waiving everything should be an obvious
+    // condition, not a quiet "None" the contractor has to interpret.
+    const user = userEvent.setup()
+    api.projects.mockImplementation(async () => [
+      { ...PROJECT, requirements: PROJECT.requirements.map((r) => ({ ...r, is_mandatory: false })) },
+    ])
+    await openPool(user)
+
+    expect(screen.getByText(/nothing is required/i)).toBeInTheDocument()
+    expect(screen.getByText(/every worker in your pool counts as deployable/i))
+      .toBeInTheDocument()
   })
 })

@@ -126,20 +126,57 @@ class Command(BaseCommand):
                 defaults={"description": desc, "is_expirable": expirable},
             )
             out[name] = req
+
+        # The intake pillars live in the same catalogue so the contractor can
+        # waive them like anything else. Seeded here as well as in migration
+        # 0012, so a database built from scratch is not left without them.
+        pillars = [
+            ("Medical Exam", "MEDICAL",
+             "Medical fitness examination, valid one year from the exam date."),
+            ("Police Verification", "POLICE",
+             "Police verification certificate, valid one year from issue."),
+            ("Trade Test", "TRADE_TEST",
+             "Practical trade test administered by the contractor."),
+            ("Safety Training Video", "SAFETY_VIDEO",
+             "Mandatory safety induction video, watched to completion."),
+            ("Resume on file", "RESUME",
+             "A scanned resume parsed into a searchable candidate profile."),
+        ]
+        for name, code, desc in pillars:
+            req, _ = RequirementMaster.objects.get_or_create(
+                name=name,
+                defaults={
+                    "description": desc,
+                    "kind": RequirementMaster.Kind.PILLAR,
+                    "pillar_code": code,
+                    "is_expirable": False,
+                },
+            )
+            out[name] = req
         return out
 
     # -- projects ------------------------------------------------------------
+    # The four pillars that blocked deployment before they became waivable.
+    # "Resume on file" is deliberately absent: it was advisory, and seeding it
+    # as mandatory would quietly raise the bar on every demo project.
+    PILLAR_NAMES = [
+        "Medical Exam",
+        "Police Verification",
+        "Trade Test",
+        "Safety Training Video",
+    ]
+
     def _seed_projects(self, pe, contractor, requirements) -> list[Project]:
         project_specs = [
             {
                 "name": "Plant-A Turnaround 2026",
                 "description": "Annual maintenance shutdown, Plant A.",
-                "requirements": ["Aadhar", "PAN", "Safety Training"],
+                "requirements": ["Aadhar", "PAN", "Safety Training"] + self.PILLAR_NAMES,
             },
             {
                 "name": "Warehouse Expansion Phase-2",
                 "description": "Civil works for the new warehouse block.",
-                "requirements": ["Aadhar", "Safety Training"],
+                "requirements": ["Aadhar", "Safety Training"] + self.PILLAR_NAMES,
             },
         ]
         projects = []
@@ -158,6 +195,13 @@ class Command(BaseCommand):
                     requirement=requirements[req_name],
                     defaults={"is_mandatory": True},
                 )
+            # Present so the contractor can switch it on, waived so it does not
+            # start blocking rosters that never had a resume.
+            ProjectRequirement.objects.get_or_create(
+                project=project,
+                requirement=requirements["Resume on file"],
+                defaults={"is_mandatory": False},
+            )
             projects.append(project)
         return projects
 

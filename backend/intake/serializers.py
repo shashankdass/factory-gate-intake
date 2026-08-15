@@ -57,7 +57,7 @@ class UserSerializer(serializers.ModelSerializer):
 class RequirementMasterSerializer(serializers.ModelSerializer):
     class Meta:
         model = RequirementMaster
-        fields = ["id", "name", "description", "is_expirable"]
+        fields = ["id", "name", "description", "is_expirable", "kind", "pillar_code"]
 
 
 class ProjectRequirementSerializer(serializers.ModelSerializer):

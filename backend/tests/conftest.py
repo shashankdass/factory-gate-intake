@@ -71,11 +71,37 @@ def gate(db):
 
 @pytest.fixture
 def requirements(db):
+    """Document requirements only — the pillars are a separate fixture.
+
+    Kept separate so the existing tests keep exercising the unconfigured-project
+    fallback, where a project with no pillar rows still enforces the defaults.
+    """
     specs = [("Aadhar", False), ("PAN", False), ("Safety Training", True)]
     return {
         name: RequirementMaster.objects.create(name=name, is_expirable=expirable)
         for name, expirable in specs
     }
+
+
+@pytest.fixture
+def pillars(db):
+    """The five intake pillars as catalogue entries."""
+    specs = [
+        ("Medical Exam", "MEDICAL"),
+        ("Police Verification", "POLICE"),
+        ("Trade Test", "TRADE_TEST"),
+        ("Safety Training Video", "SAFETY_VIDEO"),
+        ("Resume on file", "RESUME"),
+    ]
+    # get_or_create, not create: migration 0012 already put these in the
+    # catalogue, and the test database is built by running the migrations.
+    out = {}
+    for name, code in specs:
+        out[code], _ = RequirementMaster.objects.get_or_create(
+            name=name,
+            defaults={"kind": RequirementMaster.Kind.PILLAR, "pillar_code": code},
+        )
+    return out
 
 
 @pytest.fixture

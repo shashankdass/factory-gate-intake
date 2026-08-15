@@ -425,6 +425,11 @@ function RequiredDocuments({ project, masterReqs, token, onChanged }) {
   const waived = project.requirements.filter((r) => !r.is_mandatory)
   const currentIds = active.map((r) => r.requirement.id)
   const available = masterReqs.filter((m) => !currentIds.includes(m.id))
+  // Documents are things the worker hands over; checks are states the platform
+  // tracks itself. Both are waivable, but mixing them in one row reads as a
+  // list of paperwork and hides why an untested worker is being held back.
+  const activeDocs = active.filter((r) => r.requirement.kind !== 'PILLAR')
+  const activePillars = active.filter((r) => r.requirement.kind === 'PILLAR')
 
   async function apply(ids, verb) {
     setBusy(true)
@@ -452,27 +457,49 @@ function RequiredDocuments({ project, masterReqs, token, onChanged }) {
     apply(currentIds.filter((id) => id !== entry.requirement.id), 'remove')
   }
 
+  const pill = (r) => (
+    <span key={r.id} className={`pill removable ${r.requirement.kind === 'PILLAR' ? 'pillar' : ''}`}>
+      {r.requirement.name}
+      {r.requirement.is_expirable ? ' ⏳' : ''}
+      <button
+        className="pill-x"
+        disabled={busy}
+        title={`Remove ${r.requirement.name} from this project`}
+        aria-label={`Remove ${r.requirement.name}`}
+        onClick={() => remove(r)}
+      >
+        ✕
+      </button>
+    </span>
+  )
+
   return (
     <div className="requirements-strip">
-      <strong>Required documents:</strong>{' '}
-      {active.map((r) => (
-        <span key={r.id} className="pill removable">
-          {r.requirement.name}
-          {r.requirement.is_expirable ? ' ⏳' : ''}
-          <button
-            className="pill-x"
-            disabled={busy}
-            title={`Remove ${r.requirement.name} from this project`}
-            aria-label={`Remove ${r.requirement.name}`}
-            onClick={() => remove(r)}
-          >
-            ✕
-          </button>
-        </span>
-      ))}
+      <div className="req-line">
+        <strong>Documents:</strong>{' '}
+        {activeDocs.length ? (
+          activeDocs.map(pill)
+        ) : (
+          <span className="muted">none</span>
+        )}
+      </div>
+
+      {/* Same mechanism as documents. These used to be hard-coded and always
+          blocking, which meant an Aadhaar card could be waived but a trade test
+          could not. */}
+      <div className="req-line">
+        <strong>Checks:</strong>{' '}
+        {activePillars.length ? (
+          activePillars.map(pill)
+        ) : (
+          <span className="muted">none</span>
+        )}
+      </div>
 
       {active.length === 0 && (
-        <span className="muted">None — only the intake pillars are checked.</span>
+        <div className="req-line req-nothing">
+          ⚠ Nothing is required — every worker in your pool counts as deployable.
+        </div>
       )}
 
       {available.length > 0 &&
@@ -487,12 +514,25 @@ function RequiredDocuments({ project, masterReqs, token, onChanged }) {
             }
             onBlur={() => setAdding(false)}
           >
-            <option value="">— pick a document —</option>
-            {available.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-              </option>
-            ))}
+            <option value="">— pick one —</option>
+            <optgroup label="Documents">
+              {available
+                .filter((m) => m.kind !== 'PILLAR')
+                .map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
+            </optgroup>
+            <optgroup label="Checks">
+              {available
+                .filter((m) => m.kind === 'PILLAR')
+                .map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
+            </optgroup>
           </select>
         ) : (
           <button className="btn small ghost" disabled={busy} onClick={() => setAdding(true)}>
